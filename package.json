@@ -1,14 +1,24 @@
 {
-  "name": "@agegr/pi-web",
+  "name": "@pricening/pi-web",
   "version": "0.9.1",
-  "description": "Web UI for the pi coding agent",
-  "homepage": "https://github.com/agegr/pi-web#readme",
+  "description": "Web UI for the pi coding agent (fork of @agegr/pi-web with server-side pinned projects and sessions)",
+  "homepage": "https://github.com/PriceNing/pi-web#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agegr/pi-web.git"
+    "url": "git+https://github.com/PriceNing/pi-web.git"
   },
   "bugs": {
-    "url": "https://github.com/agegr/pi-web/issues"
+    "url": "https://github.com/PriceNing/pi-web/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "forkedFrom": {
+    "name": "@agegr/pi-web",
+    "version": "0.9.1",
+    "commit": "fcd94bf797235f192c58a0cc774da405da9e0b68",
+    "url": "https://github.com/agegr/pi-web"
   },
   "license": "MIT",
   "engines": {
@@ -37,8 +47,10 @@
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
-    "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
-    "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
+    "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\" \"scripts/**/*.test.mjs\"",
+    "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public",
+    "release:pin": "npm run build && npm publish --tag next",
+    "release:pin:latest": "npm run build && npm publish"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.85.1",

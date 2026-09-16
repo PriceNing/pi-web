@@ -24,5 +24,7 @@ export function isNewerStableVersion(candidate: string, current: string): boolea
 
 export function getPiWebReleaseUrl(version: string): string | null {
   if (!parseStableVersion(version)) return null;
-  return `https://github.com/agegr/pi-web/releases/tag/v${version}`;
+  // [pin-fork] Release notes live on the fork, because a fork version number
+  // only has a release tag there.
+  return `https://github.com/PriceNing/pi-web/releases/tag/v${version}`;
 }
