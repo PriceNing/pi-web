@@ -122,15 +122,26 @@ jobs:
           #   2) 把 latest 改回去需要能改 dist-tag 的凭据——普通 token 被账号 2FA 策略
           #      挡掉（实测 403），而 Trusted Publishing (OIDC) 只能发布、不能改 tag。
           # 灰度因此放在安装层：见 docs/FORK.md §7（生产机锁版本 + 先升一台 canary）。
-          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
-            # 兜底通道：配置了 NPM_TOKEN 就用它（npm 公告：2027-01 起绕过 2FA 的
-            # granular token 不能再直接发布，届时必须走下面的 OIDC）。
-            printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
-            npm publish
-          else
-            # 首选通道：Trusted Publishing (OIDC)，无 secret、无过期。
-            npm publish --provenance
+          # 发布通道：OIDC 优先（无 secret、无过期，也是 2027-01 token 禁令之后唯一可行的
+          # 路径），失败才退回 NPM_TOKEN 兜底。这样每次发布都在顺手验证 OIDC 是否配好，
+          # 同时不牺牲退路。
+          set +e
+          echo "::group::尝试 Trusted Publishing (OIDC)"
+          npm publish --provenance
+          oidc_status=$?
+          echo "::endgroup::"
+          if [ "$oidc_status" = "0" ]; then
+            echo "✅ OIDC 发布成功：Trusted Publishing 已生效，本次发布没有用到任何 secret"
+            exit 0
           fi
+          echo "::warning title=OIDC 发布未通过::npm publish --provenance 退出码 ${oidc_status}；下面尝试 NPM_TOKEN 兜底"
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error title=没有可用发布通道::OIDC 失败且未配置 NPM_TOKEN。请到 npm 包页面核对 Trusted Publishing：Organization or user=PriceNing、Repository=pi-web、Branch=main、Workflow filename=sync-upstream.yml，并且必须勾选 Allow npm publish"
+            exit 1
+          fi
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
+          echo "↩︎ 使用 NPM_TOKEN 兜底发布（绕过 2FA 的 granular token 于 2027-01 失效，届时只能靠 OIDC）"
+          npm publish
 
       - name: 打包 tarball 作为 Release 附件（内网/镜像拉不到 npm 时的兜底）
         if: steps.version.outputs.skip != '1'
