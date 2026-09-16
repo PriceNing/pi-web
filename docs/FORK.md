@@ -246,9 +246,24 @@ npm uninstall -g @agegr/pi-web
 npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 ```
 
-为什么不能先装后卸：两个包的全局 bin 垫片**同名**（`%APPDATA%\npm\pi-web.cmd/.ps1`），
-先装 fork 会覆盖垫片，随后卸载官方包会把这个共享垫片一并删掉，结果 fork 还在但
-`pi-web` 命令消失。
+为什么不能先装后卸（实测）：两个包的全局 bin 垫片**同名**（`%APPDATA%\npm\pi-web.cmd/.ps1`），
+官方包在位时 `npm i -g @pricening/pi-web` 会**直接失败**：
+
+```
+npm error EEXIST: File already exists  →  Remove the existing file and try again,
+                                          or run npm with --force to overwrite files recklessly.
+```
+
+而且失败后会留下一个半成品安装（`npm ls -g` 里显示 `@pricening/pi-web@` 且版本为空），
+必须先 `npm uninstall -g @pricening/pi-web` 再重来。所以：
+
+- **正在运行的机器**（不能先卸官方，否则服务断）：`npm i -g @pricening/pi-web@<版本> --force` 装 fork
+  → 切换启动器 → 停旧起新 → **确认 fork 已在服务后**再卸官方包（参考一次性脚本 `pi-web-cutover.ps1` 的顺序）
+- **能停机的机器**：老实按上面的顺序先卸后装，不用 `--force`
+
+另：卸载其中一个包时，npm 可能把**共享的 `pi-web` 命令垫片一并删掉**（即使另一个包还在）。
+`scripts/pi-web-start.bat` 用绝对路径 `node ...\bin\pi-web.js` 启动，不依赖那个垫片，所以服务不受影响；
+但手动敲 `pi-web` 会失效，需重装一次补上垫片。
 
 ### 7.2 常驻启动：`scripts/pi-web-start.bat`
 
