@@ -99,13 +99,20 @@ jobs:
                           | awk -F': ' '/^[A-Za-z0-9_-]+: /{print $2}' || true
                       } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 )
           published=${published:-0.0.0}
+          # 仓库当前的版本（上次发布留下的）。它才是"有没有新东西"的判据。
+          base=$(node -p "require('./package.json').version")
           next=$(node scripts/next-version.mjs --published "$published")
           echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "next=$next" >> "$GITHUB_OUTPUT"
+          # 不能拿 next 和 published 比：按版本规则 next 永远大于 published（bumpPatch），
+          # 那样这个条件几乎永不成立，每天的定时任务都会发一个内容完全相同的空版本。
+          # 正确的判据是：上游没有新提交，且仓库版本已经就是已发布的那个版本。
           if [ "${{ steps.merge.outputs.incoming }}" = "0" ] \
-             && [ "$next" = "$published" ] \
+             && [ "$base" = "$published" ] \
              && [ "${{ inputs.force_publish }}" != "true" ]; then
             echo "skip=1" >> "$GITHUB_OUTPUT"
+            echo "无上游新提交且 $base 已发布，跳过发版"
           fi
 
       - name: 构建
@@ -228,6 +235,7 @@ jobs:
             echo "## Fork 同步结果"
             echo "- 上游新提交：${{ steps.merge.outputs.incoming }}"
             echo "- 已发布最高版本：${{ steps.version.outputs.published }}"
+            echo "- 仓库当前版本：${{ steps.version.outputs.base }}"
             echo "- 本次版本：${{ steps.version.outputs.next }}"
             echo "- 跳过发布：${{ steps.version.outputs.skip || '0' }}"
             echo "- 升级方式：先升一台 canary（\`npm i -g ${PKG}@${{ steps.version.outputs.next }}\`），验证后再改部署脚本里的 PINNED_VERSION"
