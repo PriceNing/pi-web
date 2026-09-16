@@ -21,8 +21,10 @@ on:
 
 permissions:
   contents: write # 推送 main 与创建 Release
-  workflows: write # 推送带 .github/workflows/ 的 ref 需要此权限（否则 GitHub 拒收）
   id-token: write # npm Trusted Publishing (OIDC)
+# 注意：GITHUB_TOKEN 无法改动 .github/workflows/ 下的文件，而且
+# \`workflows\` 不是合法的 workflow permissions 键（写了会导致 workflow 解析失败）。
+# 上游同步迟早会带进 ci.yml 的改动，所以推送这一步支持用 GIT_PUSH_TOKEN(PAT) 兜底。
 
 concurrency:
   group: sync-upstream
@@ -156,6 +158,8 @@ jobs:
 
       - name: 提交合并结果并打 tag
         if: steps.version.outputs.skip != '1'
+        env:
+          GIT_PUSH_TOKEN: ${{ secrets.GIT_PUSH_TOKEN }}
         run: |
           version="${{ steps.version.outputs.next }}"
           # 只提交版本号：dist-pack/ 里是刚打的 tarball，绝不能进仓库。
@@ -163,10 +167,20 @@ jobs:
           git diff --cached --quiet || git commit -m "chore(release): v${version}"
           git tag -f "v${version}"
           # 不要用 --follow-tags：它会顺着 main 的历史把上游的几十个 tag 一起推到 fork，
-          # 其中指向“新增 workflow 文件”的 tag 会被 GitHub 拒收，整步失败。
+          # 其中指向"新增 workflow 文件"的 tag 会被 GitHub 拒收，整步失败。
           # 只推我们自己的发布 tag。
-          git push origin "HEAD:refs/heads/main"
-          git push origin "refs/tags/v${version}:refs/tags/v${version}" --force
+          push_url="origin"
+          if [ -n "${GIT_PUSH_TOKEN:-}" ]; then
+            # 带 PAT 时用 https+token 直推，这样即使本次合并改到了
+            # .github/workflows/ 里的文件（GITHUB_TOKEN 不允许）也不会卡住。
+            git remote set-url origin               "https://x-access-token:${GIT_PUSH_TOKEN}@github.com/PriceNing/pi-web.git"
+            echo "使用 GIT_PUSH_TOKEN(PAT) 推送"
+          fi
+          if ! git push "$push_url" "HEAD:refs/heads/main"; then
+            echo "::error title=推送 main 失败::多半是本次合并改到了 .github/workflows/ 下的文件（GITHUB_TOKEN 无权修改）。两种解法：(1) 在仓库 secrets 里加 GIT_PUSH_TOKEN（fine-grained PAT，contents:Read&Write）；(2) 本地 git push origin main。本次 npm 包已发布成功，只是 git 侧未同步。"
+            exit 1
+          fi
+          git push "$push_url" "refs/tags/v${version}:refs/tags/v${version}" --force
 
       - name: 创建 GitHub Release（附 tarball）
         if: steps.version.outputs.skip != '1'
