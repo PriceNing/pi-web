@@ -261,9 +261,16 @@ npm error EEXIST: File already exists  →  Remove the existing file and try aga
   → 切换启动器 → 停旧起新 → **确认 fork 已在服务后**再卸官方包（参考一次性脚本 `pi-web-cutover.ps1` 的顺序）
 - **能停机的机器**：老实按上面的顺序先卸后装，不用 `--force`
 
-另：卸载其中一个包时，npm 可能把**共享的 `pi-web` 命令垫片一并删掉**（即使另一个包还在）。
+另：卸载其中一个包时，npm 会把**共享的 `pi-web` 命令垫片一并删掉**（即使另一个包还在）。
 `scripts/pi-web-start.bat` 用绝对路径 `node ...\bin\pi-web.js` 启动，不依赖那个垫片，所以服务不受影响；
-但手动敲 `pi-web` 会失效，需重装一次补上垫片。
+但手动敲 `pi-web` 会失效。
+
+> **实测修复方法（真实切换时踩过）**：服务在跑的时候，`npm i -g @pricening/pi-web --force` 会
+> 报 `EBUSY: resource busy or locked, rename ...\@pricening\pi-web -> ...\.pi-web-xxxx`（Windows 下
+> 运行中的包目录改不了）。正确的补刀是**不重装、只重建链接**，无需停机也不会掉会话：
+> ```powershell
+> npm rebuild -g @pricening/pi-web     # 恢复 pi-web / pi-web.cmd / pi-web.ps1 三个垫片
+> ```
 
 ### 7.2 常驻启动：`scripts/pi-web-start.bat`
 
