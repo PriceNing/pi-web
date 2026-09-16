@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: write # 推送 main 与创建 Release
+  workflows: write # 推送带 .github/workflows/ 的 ref 需要此权限（否则 GitHub 拒收）
   id-token: write # npm Trusted Publishing (OIDC)
 
 concurrency:
@@ -150,7 +151,11 @@ jobs:
           git add package.json
           git diff --cached --quiet || git commit -m "chore(release): v${version}"
           git tag -f "v${version}"
-          git push origin main --follow-tags
+          # 不要用 --follow-tags：它会顺着 main 的历史把上游的几十个 tag 一起推到 fork，
+          # 其中指向“新增 workflow 文件”的 tag 会被 GitHub 拒收，整步失败。
+          # 只推我们自己的发布 tag。
+          git push origin "HEAD:refs/heads/main"
+          git push origin "refs/tags/v${version}:refs/tags/v${version}" --force
 
       - name: 创建 GitHub Release（附 tarball）
         if: steps.version.outputs.skip != '1'
