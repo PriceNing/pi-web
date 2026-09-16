@@ -111,19 +111,23 @@ Tag 约定：
 
 ## 5. 发布流程
 
-### 5.1 首版（手工，一次性）
+### 5.1 首版（由 CI 发，**不要**在 Windows 本地发）
 
-npm 的 Trusted Publishing 要求**包已存在**才能配置信任关系，所以第一版手工发：
+> **实测环境限制**：`npm run build`（webpack 生产构建）在本机 Windows 上会 OOM ——
+> 默认 4 GB 堆约 3.5 分钟崩一次；给到 `--max-old-space-size=8192` 与 `12288` 时，
+> 分别在约 14 分钟后仍因堆耗尽失败（`Ineffective mark-compacts near heap limit`）。
+> 同一份代码在 ubuntu-latest 上约 2 分钟构建完成（上游 `ci.yml` 的 e2e job 就是证据）。
+> **结论：构建与发布只在 CI 里做。** 本地只做 `npm run dev` 预览与 `npm test`。
 
-```powershell
-npm login --registry=https://registry.npmjs.org/ --auth-type=web
-npm whoami --registry=https://registry.npmjs.org/     # 应输出 pricening
-npm run build
-npm publish --tag next
-```
+npm 的 Trusted Publishing 需要在 npmjs.com 的**包页面**上配置，而包页面只有发布过之后才存在，
+所以**第一次发布用 `NPM_TOKEN`**（一次性），之后切换到 OIDC：
 
-> `package.json` 里写死了 `publishConfig.registry = https://registry.npmjs.org/`，
-> 所以即使本机 `~/.npmrc` 指向腾讯镜像，也不会误发到镜像上（镜像是只读代理，会 409）。
+1. 在 npm 建 granular token：权限 `Read and write (publish and stage)`、scope 限定 `@pricening`、
+   **不勾 Bypass 2FA**、**不填 IP 白名单**（Actions 出口 IP 会变）。
+2. `gh secret set NPM_TOKEN --repo PriceNing/pi-web`（交互粘贴，别让 token 进聊天记录）。
+3. 手动触发 `Sync upstream & publish fork` workflow（`force_publish` 可选）。
+4. 首版上线后，去包页面配好 Trusted Publishing，然后**删掉 `NPM_TOKEN` secret**，
+   CI 会自动走 OIDC 分支（见 `sync-upstream.yml` 的发布步骤）。
 
 ### 5.2 之后（CI 自动，`.github/workflows/sync-upstream.yml`）
 
@@ -236,8 +240,9 @@ pin 数据落在 `~/.pi/agent/pi-web/pins.json`：备份/迁移 agentDir 时自�
 npm run lint
 npx tsc --noEmit
 npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 全绿
-npm run build     # 只有需要发布/自测时才跑；它会污染 .next 并打断 npm run dev
 ```
+
+**不要在本地跑 `npm run build`**（见 §5.1 的 OOM 实测）；构建属于 CI。
 
 手工抽查（2 分钟）：
 
