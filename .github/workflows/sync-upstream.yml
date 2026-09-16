@@ -4,7 +4,8 @@
 #   - main = 上游 + 本 fork 的补丁；同步方式是 merge upstream/main，不是 rebase。
 #   - 任何一步失败都不推送、不发版，避免生产机装到半成品。
 #   - 版本必须是纯 x.y.z（上游的更新检查只认这个格式），规则见 scripts/next-version.mjs。
-#   - 先发 `next` tag 做灰度，人工确认后再 `npm dist-tag add ... latest`。
+#   - 灰度放在安装层（生产机锁精确版本 + 先升一台 canary），不依赖 registry dist-tag，
+#     原因见下面"发布到 npm"步骤里的两条实测结论。
 
 name: Sync upstream & publish fork
 
@@ -87,8 +88,15 @@ jobs:
       - name: 计算版本号
         id: version
         run: |
-          published=$(npm view "$PKG" version --registry "$REGISTRY" 2>/dev/null || echo "0.0.0")
-          next=$(node scripts/next-version.mjs --published "${published:-0.0.0}")
+          # 新包刚发布时，registry 的 packument 路由（npm view 走的就是它）可能仍返回
+          # 404，而 dist-tags 路由已经可用。只看 npm view 会把"已经发过版"误判成
+          # "从未发过版"，下次就会算出重复版本号并撞上 E409。所以两个来源都取，拿最大值。
+          published=$( { npm view "$PKG" version --registry "$REGISTRY" 2>/dev/null || true
+                        npm dist-tag ls "$PKG" --registry "$REGISTRY" 2>/dev/null \
+                          | awk -F': ' '/^[A-Za-z0-9_-]+: /{print $2}' || true
+                      } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 )
+          published=${published:-0.0.0}
+          next=$(node scripts/next-version.mjs --published "$published")
           echo "published=$published" >> "$GITHUB_OUTPUT"
           echo "next=$next" >> "$GITHUB_OUTPUT"
           if [ "${{ steps.merge.outputs.incoming }}" = "0" ] \
@@ -103,29 +111,36 @@ jobs:
           npm version "${{ steps.version.outputs.next }}" --no-git-tag-version --allow-same-version
           npm run build
 
-      - name: 发布到 npm（next tag，灰度用）
+      - name: 发布到 npm
         if: steps.version.outputs.skip != '1'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          # 直接发 latest，不用 `--tag next`。两条实测结论决定了这一点：
+          #   1) 首次发布时即使加 --tag next，npm 仍会创建 latest，"next 灰度"形同虚设；
+          #   2) 把 latest 改回去需要能改 dist-tag 的凭据——普通 token 被账号 2FA 策略
+          #      挡掉（实测 403），而 Trusted Publishing (OIDC) 只能发布、不能改 tag。
+          # 灰度因此放在安装层：见 docs/FORK.md §7（生产机锁版本 + 先升一台 canary）。
           if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
-            # 兜底通道：配置了 NPM_TOKEN 就用它（注意 npm 公告：2027-01 起
-            # 绕过 2FA 的 granular token 不能再直接发布，届时必须走下面的 OIDC）。
+            # 兜底通道：配置了 NPM_TOKEN 就用它（npm 公告：2027-01 起绕过 2FA 的
+            # granular token 不能再直接发布，届时必须走下面的 OIDC）。
             printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
-            npm publish --tag next
+            npm publish
           else
             # 首选通道：Trusted Publishing (OIDC)，无 secret、无过期。
-            npm publish --tag next --provenance
+            npm publish --provenance
           fi
 
       - name: 打包 tarball 作为 Release 附件（内网/镜像拉不到 npm 时的兜底）
         if: steps.version.outputs.skip != '1'
+        id: pack
         run: |
+          # npm pack 不会创建 --pack-destination 目录，必须自己 mkdir。
+          mkdir -p ./dist-pack
           npm pack --pack-destination ./dist-pack
           tarball=$(ls dist-pack/*.tgz | head -1)
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           echo "pkg_name=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
-        id: pack
 
       - name: 提交合并结果并打 tag
         if: steps.version.outputs.skip != '1'
@@ -144,17 +159,25 @@ jobs:
         run: |
           version="${{ steps.version.outputs.next }}"
           pkg_name="${{ steps.pack.outputs.pkg_name }}"
+          base=$(node -p "require('./package.json').forkedFrom.version")
           notes=$(git log --pretty=format:'- %s' -20 "v${version}" | head -40)
-          gh release create "v${version}" \
-            --title "v${version} (next)" \
-            --notes "上游基线：$(node -p "require('./package.json').forkedFrom.version")
-          发布通道：npm dist-tag \`next\`（人工确认后提升到 latest）
-
-          安装：
-            npm i -g ${PKG}@${version} --registry=${REGISTRY}
-          或离线：下载本页附件 ${pkg_name}，执行 npm i -g ./${pkg_name}
-
-          ${notes}" \
+          {
+            echo "上游基线：v${base}"
+            echo
+            echo "## 安装"
+            echo '```'
+            echo "npm i -g ${PKG}@${version} --registry=${REGISTRY}"
+            echo '```'
+            echo
+            echo "离线兜底：下载本页附件 \`${pkg_name}\`，执行 \`npm i -g ./${pkg_name}\`"
+            echo
+            echo "## 升级策略"
+            echo "先升一台 canary 验证，再改部署脚本里的 PINNED_VERSION（生产机锁精确版本）。"
+            echo
+            echo "## 本版本包含的提交"
+            echo "${notes}"
+          } > release-notes.md
+          gh release create "v${version}" --title "v${version}" --notes-file release-notes.md \
             "${{ steps.pack.outputs.tarball }}"
 
       - name: 结果摘要
@@ -165,5 +188,5 @@ jobs:
             echo "- 已发布最高版本：${{ steps.version.outputs.published }}"
             echo "- 本次版本：${{ steps.version.outputs.next }}"
             echo "- 跳过发布：${{ steps.version.outputs.skip || '0' }}"
-            echo "- 提升为正式版：\`npm dist-tag add ${PKG}@${{ steps.version.outputs.next }} latest\`"
+            echo "- 升级方式：先升一台 canary（\`npm i -g ${PKG}@${{ steps.version.outputs.next }}\`），验证后再改部署脚本里的 PINNED_VERSION"
           } >> "$GITHUB_STEP_SUMMARY"

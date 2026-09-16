@@ -119,15 +119,21 @@ Tag 约定：
 > 同一份代码在 ubuntu-latest 上约 2 分钟构建完成（上游 `ci.yml` 的 e2e job 就是证据）。
 > **结论：构建与发布只在 CI 里做。** 本地只做 `npm run dev` 预览与 `npm test`。
 
-npm 的 Trusted Publishing 需要在 npmjs.com 的**包页面**上配置，而包页面只有发布过之后才存在，
-所以**第一次发布用 `NPM_TOKEN`**（一次性），之后切换到 OIDC：
+npm 的 Trusted Publishing 要在 npmjs.com 的**包页面**上配置，而包页面只有发布过之后才存在，
+所以**首版用一次 `NPM_TOKEN`**，之后切到 OIDC：
 
 1. 在 npm 建 granular token：权限 `Read and write (publish and stage)`、scope 限定 `@pricening`、
-   **不勾 Bypass 2FA**、**不填 IP 白名单**（Actions 出口 IP 会变）。
+   **不填 IP 白名单**（Actions 出口 IP 会变）。
 2. `gh secret set NPM_TOKEN --repo PriceNing/pi-web`（交互粘贴，别让 token 进聊天记录）。
 3. 手动触发 `Sync upstream & publish fork` workflow（`force_publish` 可选）。
-4. 首版上线后，去包页面配好 Trusted Publishing，然后**删掉 `NPM_TOKEN` secret**，
-   CI 会自动走 OIDC 分支（见 `sync-upstream.yml` 的发布步骤）。
+4. 首版上线后去包页面配 Trusted Publishing，然后**删掉 `NPM_TOKEN` secret**，
+   CI 自动走 OIDC 分支（见 `sync-upstream.yml` 的发布步骤）。
+
+> ⚠️ **2FA 实测结论（踩过两次才摸清）**：账号开启"发布需要 2FA"后——
+> - 不勾 Bypass 2FA 的 granular token 发布 → `403 ... bypass 2fa enabled is required to publish`
+> - web login 拿到的 CLI token 改 dist-tag → 同样 `403`
+> - 所以**破冰首版必须用一次性 bypass token**；发完立刻 revoke 该 token 并删掉 secret。
+>   （npm 公告：2027-01 起绕过 2FA 的 granular token 不能再直接发布，但我们只用它破冰一次。）
 
 ### 5.2 之后（CI 自动，`.github/workflows/sync-upstream.yml`）
 
@@ -135,20 +141,30 @@ npm 的 Trusted Publishing 需要在 npmjs.com 的**包页面**上配置，而�
 
 ```
 fetch upstream → merge → npm ci → lint → tsc → npm test（含锚点测试）
-→ 算版本 → next build → npm publish --tag next → 打 tag → GitHub Release（附 tarball）→ push main
+→ 算版本 → next build → npm publish（latest）→ npm pack → 打 tag → GitHub Release（附 tarball）→ push main
 ```
 
 任何一步失败：**不推送、不发版**。合并冲突会在 CI 里明确列出可能涉及的文件。
 
-### 5.3 灰度与提升
+### 5.3 灰度：放在安装层，不放在 registry tag 层
 
-CI 只发到 **`next`** tag。人工确认后才提正式：
+**不要用 `--tag next` 做灰度**，两条实测理由：
 
-```bash
-npm dist-tag add @pricening/pi-web@0.9.2 latest
+1. 首次发布时即使 `npm publish --tag next`，npm **仍会创建 `latest`** —— `next` 通道拦不住任何人。
+2. 事后把 `latest` 挪回去需要"能改 dist-tag 的凭据"：普通 token 被 2FA 策略挡掉（实测 403），
+   而 Trusted Publishing (OIDC) **只能发布、不能改 tag**。也就是说这条收口路径不可持续。
+
+所以灰度改由**安装层**保证，效果等价且不需要任何额外凭据：
+
+```powershell
+# ① 只升 canary 一台（显式版本号）
+npm i -g @pricening/pi-web@0.9.2 --registry=https://registry.npmjs.org/
+# ② 用一天，确认没问题
+# ③ 再改部署脚本里的 PINNED_VERSION，其余机器才会升
 ```
 
-生产机 `npm update` 只会看到 `latest`，所以有天然的缓冲。
+关键前提：**生产机永远按精确版本安装**（见 §7）。这样 registry 上有没有 `latest`
+都不重要 —— 没有任何机器会自动跟进，坏版本最多影响 canary 一台。
 
 ---
 
