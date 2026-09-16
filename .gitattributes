@@ -1,0 +1,3 @@
+# Windows 批处理必须带 CRLF 才能可靠地被 cmd.exe 解析；仓库内存 LF，签出时转 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf

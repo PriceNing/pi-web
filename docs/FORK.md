@@ -194,25 +194,84 @@ git push origin main
 
 ## 7. 生产机部署与回滚
 
+### 7.1 一次性安装 / 升级 / 回滚
+
 ```powershell
 # 推荐用本仓库的助手：它会强制精确版本、显式 registry，并提醒官方包冲突
 node scripts/deploy-pi-web.mjs status            # 本机版本 + 最新可装版本
-node scripts/deploy-pi-web.mjs install 0.9.2     # 安装/升级（canary 一台）
-node scripts/deploy-pi-web.mjs rollback 0.9.1    # 回滚（同样是精确版本）
+node scripts/deploy-pi-web.mjs install 0.9.5     # 安装/升级（canary 一台）
+node scripts/deploy-pi-web.mjs rollback 0.9.4    # 回滚（同样是精确版本）
 
 # 它等价于：
-npm i -g @pricening/pi-web@0.9.2 --registry=https://registry.npmjs.org/
+npm i -g @pricening/pi-web@0.9.5 --registry=https://registry.npmjs.org/
 
 # 拉不到 npm 时，用 GitHub Release 的 tarball 兜底
-npm i -g .\pricening-pi-web-0.9.2.tgz
+npm i -g .\pricening-pi-web-0.9.5.tgz
+```
+
+从官方版切换过来的正确顺序（**先卸后装**）：
+
+```bat
+npm uninstall -g @agegr/pi-web
+npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
+```
+
+为什么不能先装后卸：两个包的全局 bin 垫片**同名**（`%APPDATA%\npm\pi-web.cmd/.ps1`），
+先装 fork 会覆盖垫片，随后卸载官方包会把这个共享垫片一并删掉，结果 fork 还在但
+`pi-web` 命令消失。
+
+### 7.2 常驻启动：`scripts/pi-web-start.bat`
+
+本仓库的 `scripts/pi-web-start.bat` 是**规范副本**，部署到跑 pi-web 的机器上并让计划任务指向它：
+
+```bat
+copy /Y scripts\pi-web-start.bat "%USERPROFILE%\Desktop\pi-web-start.bat"
+schtasks /Create /TN pi-web-server /TR "\"%USERPROFILE%\Desktop\pi-web-start.bat\"" /SC ONSTART /RU <用户> /RP /RL HIGHEST /F
+schtasks /Run /TN pi-web-server
+```
+
+它做的事：定位 node/npm/全局前缀 → 缺包就装 → 有新版就升 → 启动 → 写日志。
+排错用 `pi-web-start.bat --check`，会打印解析到的 node / npm / prefix / registry / 入口路径 / 已装版本。
+
+可用环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `PI_WEB_HOSTNAME` / `PI_WEB_PORT` | 监听地址（默认 `0.0.0.0` / `30141`） |
+| `PI_WEB_LOG` | 日志文件（默认 `%LOCALAPPDATA%\pi-web\logs\pi-web-start.log`） |
+| `PI_WEB_PASSWORD` | 开启登录鉴权；`0.0.0.0` 若能被可信网络之外访问就必须设 |
+| **`PI_WEB_PIN`** | 锁定精确版本并**跳过自动升级** |
+
+> ⚠️ **生产机必须设 `PI_WEB_PIN`**。这个 launcher 每次开机都会跑一遍，而 fork 的 `@latest`
+> 是 CI 自动发布的 —— 不设锁就等于把「上游提交 → CI 构建 → 自动发 npm → 所有机器下次开机
+> 自动吸收」连成无人值守的一条链。CI 门禁能挡住编译/测试失败，挡不住"全绿但行为不对"。
+> 例外：canary 那台不设 `PI_WEB_PIN`，让它自动吃 `@latest`，正是它的用途。
+
+### 7.3 Windows 上踩过的坑（都已实测）
+
+| 坑 | 现象 | 结论 |
+|---|---|---|
+| `Start-Process pi-web` | `%1 is not a valid Win32 application` | npm 的全局垫片是 `pi-web.ps1`，不能当可执行文件启动。必须 `node <prefix>\node_modules\@pricening\pi-web\bin\pi-web.js`（launcher 就是这么做的） |
+| 用 SSH 起分离进程 | `Start-Process` / `Win32_Process.Create` 起的进程随 SSH 会话回收而死 | 常驻只能靠计划任务（或服务），不要指望远程会话里后台拉起 |
+| 只读镜像 | `npm login` / `npm publish` 打到镜像报 409 `user registration disabled`；新 scoped 包安装 404 | `~/.npmrc` 的 `registry` 是全局的，launcher 与文档里的每条 npm 命令都显式带 `--registry` |
+| 防火墙 | 30141 入站从别的机器不通 | 远程验证要在目标机本机做（`Invoke-WebRequest http://127.0.0.1:30141/...`） |
+| 本地构建 | `npm run build` 在 Windows 上 OOM（见 §5.1） | 构建/发布只在 CI；本机只跑 dev 预览和 `npm test` |
+
+### 7.4 切换后的自检
+
+```powershell
+# 服务是否活着、pin 接口是否存在（旧版官方版没有这个路由，可用来确认切换成功）
+(Invoke-WebRequest http://127.0.0.1:30141/api/pins -UseBasicParsing).Content
+# 期望：{"sessions":[],"projects":[]}
 ```
 
 规定：
 
 - **精确版本号安装**，禁止 `^` / `latest` 落到运维脚本里；版本记录在部署仓库里，让"谁升到了哪"可审计。
-  `deploy-pi-web.mjs install` 会直接拒收非 `x.y.z` 的参数。
-- 同一台机器**不要同时安装** `@agegr/pi-web` 和 `@pricening/pi-web`：两个包的 `bin` 都叫 `pi-web`，后装的会覆盖前者。
-- 升级前先停服务，`pi-web` 会 idle 回收 AgentSession，但 `node-pty` 终端会话会断。
+  `deploy-pi-web.mjs install` 会直接拒收非 `x.y.z` 的参数，launcher 用 `PI_WEB_PIN` 表达同一约束。
+- 同一台机器**只保留一个** pi-web 包（原因见 §7.1）。
+- 升级前先停服务：`pi-web` 会 idle 回收 AgentSession，但 `node-pty` 终端会话会断。
+- 数据安全：卸载/升级**不会动 `~/.pi/agent/`**，会话、配置以及 `pi-web/pins.json`（置顶记录）都完整保留，本地 pi CLI 不受影响。
 - `PI_WEB_SKIP_VERSION_CHECK=1` 现在**不再是必须**（更新检查已指向我们自己的包），但如果你不希望界面出现任何升级提示，它仍是有效的开关。
 
 ---
