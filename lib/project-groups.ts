@@ -1,5 +1,7 @@
 import type { SessionInfo } from "./types";
 import { workspaceKeyOf } from "./workspace-memory";
+// [pin-fork]
+import { comparePinnedFirst } from "./pin-order";
 
 export interface RecentProject {
   /** Stable server-provided identity used for comparison and Map keys. */
@@ -9,7 +11,12 @@ export interface RecentProject {
 }
 
 /** Projects sorted by most recent activity and deduplicated by stable key. */
-export function getRecentProjects(sessions: readonly SessionInfo[]): RecentProject[] {
+export function getRecentProjects(
+  sessions: readonly SessionInfo[],
+  // [pin-fork] Optional pin set keyed by project identity: pinned projects come
+  // first, and pinned projects keep activity order among themselves.
+  pinnedProjectKeys?: ReadonlySet<string>,
+): RecentProject[] {
   const latestByProject = new Map<string, { root: string; modified: string }>();
   for (const session of sessions) {
     const root = session.projectRoot ?? session.cwd;
@@ -21,7 +28,10 @@ export function getRecentProjects(sessions: readonly SessionInfo[]): RecentProje
     }
   }
   return [...latestByProject.entries()]
-    .sort((a, b) => b[1].modified.localeCompare(a[1].modified))
+    .sort((a, b) => comparePinnedFirst(
+      Boolean(pinnedProjectKeys?.has(a[0])),
+      Boolean(pinnedProjectKeys?.has(b[0])),
+    ) || b[1].modified.localeCompare(a[1].modified))
     .map(([key, { root }]) => ({ key, root }));
 }
 

@@ -11,6 +11,9 @@ import {
   getRpcSessionInfos,
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
+// [pin-fork] Housekeeping only: pins for deleted sessions/projects are dropped.
+import { prunePins } from "@/lib/pin-store";
+import { workspaceKeyOf } from "@/lib/workspace-memory";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +28,11 @@ export async function GET(req: Request) {
       attachSessionProjectInfo(getRpcSessionInfos()),
     ]);
     const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    // [pin-fork] Never throws, and only writes when something is actually stale.
+    await prunePins({
+      sessionIds: sessions.map((session) => session.id),
+      projectKeys: sessions.map((session) => workspaceKeyOf(session)),
+    });
     return jsonResponse(
       req,
       {

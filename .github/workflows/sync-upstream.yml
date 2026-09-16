@@ -1,0 +1,169 @@
+# [pin-fork] 上游同步 + fork 发版
+#
+# 设计约束（详见 docs/FORK.md）：
+#   - main = 上游 + 本 fork 的补丁；同步方式是 merge upstream/main，不是 rebase。
+#   - 任何一步失败都不推送、不发版，避免生产机装到半成品。
+#   - 版本必须是纯 x.y.z（上游的更新检查只认这个格式），规则见 scripts/next-version.mjs。
+#   - 先发 `next` tag 做灰度，人工确认后再 `npm dist-tag add ... latest`。
+
+name: Sync upstream & publish fork
+
+on:
+  schedule:
+    - cron: "30 6 * * *" # UTC 06:30 ≈ 北京 14:30
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: "上游无新提交时也强制走一次发布"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # 推送 main 与创建 Release
+  id-token: write # npm Trusted Publishing (OIDC)
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-and-publish:
+    runs-on: ubuntu-latest
+    # 只允许在 main 上跑：这个 workflow 会推送 main 并发布正式包。
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 30
+    env:
+      PKG: "@pricening/pi-web"
+      REGISTRY: "https://registry.npmjs.org/"
+      UPSTREAM: "https://github.com/agegr/pi-web.git"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要完整历史与 tag 才能算版本、打 Release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0 # 与 package.json engines 一致
+          cache: npm
+
+      - name: 配置 git 身份
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 拉取上游
+        run: |
+          git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
+          git fetch upstream --tags --prune
+
+      - name: 合并上游（冲突即停，不发布）
+        id: merge
+        run: |
+          incoming=$(git rev-list --count HEAD..upstream/main)
+          echo "incoming=$incoming" >> "$GITHUB_OUTPUT"
+          if [ "$incoming" = "0" ]; then
+            echo "上游无新提交"
+            exit 0
+          fi
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort
+            conflicted=$(git diff --name-only "$(git merge-base HEAD upstream/main)" upstream/main | tr '\n' ' ')
+            echo "::error title=上游合并冲突::与 upstream/main 冲突，可能涉及：$conflicted 。请本地执行： git fetch upstream && git merge upstream/main 手工解决后推送。本次不发版。"
+            exit 1
+          fi
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 质量门禁（lint / 类型 / 全量测试）
+        run: |
+          npm run lint
+          npx tsc --noEmit
+          npm test
+        # npm test 会跑 lib/pin-fork-anchors.test.mjs：上游若重构掉 pin 的接缝，
+        # 这里会红，从而不会发出一个"pin 已静默失效"的版本。
+
+      - name: 计算版本号
+        id: version
+        run: |
+          published=$(npm view "$PKG" version --registry "$REGISTRY" 2>/dev/null || echo "0.0.0")
+          next=$(node scripts/next-version.mjs --published "${published:-0.0.0}")
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.merge.outputs.incoming }}" = "0" ] \
+             && [ "$next" = "$published" ] \
+             && [ "${{ inputs.force_publish }}" != "true" ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 构建
+        if: steps.version.outputs.skip != '1'
+        run: |
+          npm version "${{ steps.version.outputs.next }}" --no-git-tag-version --allow-same-version
+          npm run build
+
+      - name: 发布到 npm（next tag，灰度用）
+        if: steps.version.outputs.skip != '1'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            # 兜底通道：配置了 NPM_TOKEN 就用它（注意 npm 公告：2027-01 起
+            # 绕过 2FA 的 granular token 不能再直接发布，届时必须走下面的 OIDC）。
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
+            npm publish --tag next
+          else
+            # 首选通道：Trusted Publishing (OIDC)，无 secret、无过期。
+            npm publish --tag next --provenance
+          fi
+
+      - name: 打包 tarball 作为 Release 附件（内网/镜像拉不到 npm 时的兜底）
+        if: steps.version.outputs.skip != '1'
+        run: |
+          npm pack --pack-destination ./dist-pack
+          tarball=$(ls dist-pack/*.tgz | head -1)
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "pkg_name=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+        id: pack
+
+      - name: 提交合并结果并打 tag
+        if: steps.version.outputs.skip != '1'
+        run: |
+          version="${{ steps.version.outputs.next }}"
+          # 只提交版本号：dist-pack/ 里是刚打的 tarball，绝不能进仓库。
+          git add package.json
+          git diff --cached --quiet || git commit -m "chore(release): v${version}"
+          git tag -f "v${version}"
+          git push origin main --follow-tags
+
+      - name: 创建 GitHub Release（附 tarball）
+        if: steps.version.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.next }}"
+          pkg_name="${{ steps.pack.outputs.pkg_name }}"
+          notes=$(git log --pretty=format:'- %s' -20 "v${version}" | head -40)
+          gh release create "v${version}" \
+            --title "v${version} (next)" \
+            --notes "上游基线：$(node -p "require('./package.json').forkedFrom.version")
+          发布通道：npm dist-tag \`next\`（人工确认后提升到 latest）
+
+          安装：
+            npm i -g ${PKG}@${version} --registry=${REGISTRY}
+          或离线：下载本页附件 ${pkg_name}，执行 npm i -g ./${pkg_name}
+
+          ${notes}" \
+            "${{ steps.pack.outputs.tarball }}"
+
+      - name: 结果摘要
+        run: |
+          {
+            echo "## Fork 同步结果"
+            echo "- 上游新提交：${{ steps.merge.outputs.incoming }}"
+            echo "- 已发布最高版本：${{ steps.version.outputs.published }}"
+            echo "- 本次版本：${{ steps.version.outputs.next }}"
+            echo "- 跳过发布：${{ steps.version.outputs.skip || '0' }}"
+            echo "- 提升为正式版：\`npm dist-tag add ${PKG}@${{ steps.version.outputs.next }} latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
