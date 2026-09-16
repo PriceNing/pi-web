@@ -326,6 +326,26 @@ schtasks /Run /TN pi-web-server
 - 数据安全：卸载/升级**不会动 `~/.pi/agent/`**，会话、配置以及 `pi-web/pins.json`（置顶记录）都完整保留，本地 pi CLI 不受影响。
 - `PI_WEB_SKIP_VERSION_CHECK=1` 现在**不再是必须**（更新检查已指向我们自己的包），但如果你不希望界面出现任何升级提示，它仍是有效的开关。
 
+### 7.5 一键接入新的生产机：`scripts/bootstrap-production.ps1`
+
+在**仓库检出目录**里用管理员 PowerShell 运行。幂等，可反复跑；默认不碰正在运行的服务。
+
+```powershell
+.\scripts\bootstrap-production.ps1 -Check        # 只体检，什么都不改
+.\scripts\bootstrap-production.ps1              # 装 fork + 部署启动器 + 建开机任务
+.\scripts\bootstrap-production.ps1 -Pin 0.9.6   # 同上，并锁版本（推荐生产机）
+.\scripts\bootstrap-production.ps1 -RestartNow  # 立刻从官方包切到 fork（会断当前 pi-web 会话）
+```
+
+它会做并且只做这些判断：
+
+- 官方包还在位时装 fork 会自动带 `--force`（否则 npm 因共享 bin 垫片 `EEXIST` 直接失败）
+- 启动器落点自动在 `%USERPROFILE%`、`%USERPROFILE%\Desktop`、公共桌面里找现有文件；找到旧版**先带时间戳备份**再覆盖（备份永不覆盖）
+- 已有同名计划任务但指向别的东西时**直接报错停手**，不猜
+- `-RestartNow` 的顺序是：停任务 → 停官方进程 → 起 fork → **确认 fork 在监听** → 才卸官方包 → 再 `npm rebuild -g` 补回被一起删掉的 `pi-web` 垫片；fork 起不来就抛错并保留官方包与备份，绝不留下"两头都没了"的状态
+
+> ⚠️ 如果你正是通过那台机器的 pi-web 在操作它，`-RestartNow` 等于自断。那种情况改用一次性计划任务在进程外执行（本次主机切换就是这么做的），或者直接重启机器。
+
 ---
 
 ## 8. 与 local pi 共享状态的边界（红线）
@@ -395,3 +415,76 @@ npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 全绿
 3. 手机/Pad 打开同一实例：一端 pin，另一端 ≤2.5 秒自动置顶
 4. `~/.pi/agent/pi-web/pins.json` 内容符合预期；删掉一个已 pin 会话后其记录消失
 5. `node scripts/deploy-pi-web.mjs status` 能看到新版本；`node -p "require('./package.json').forkedFrom.commit"` 已指向上游最新 commit；CI 发布日志出现 `✅ OIDC 发布成功`（不是兜底分支）
+
+---
+
+## 12. 两个高频问题
+
+### 12.1 上游发布了新功能/新版本，之后会发生什么？
+
+**默认路径：你什么都不用做。**
+
+```
+上游提交/发版
+  → CI 每天 14:30 拉取并 merge 进我们的 main
+  → 门禁：lint + tsc + 全量测试（含锚点测试）
+  → 干净通过 → 构建 → OIDC 发 npm（@latest）→ 打 tag + Release（附 tarball）
+  → 生产机下次开机（或重启服务）自动吸收 @latest
+```
+
+你需要**主动看一眼**的三种情况：
+
+1. **CI 变红（合并冲突）**：日志会点名可能涉及的文件。按 §6.2 本地 merge 一次即可。
+   特别注意：若冲突在 `package.json` 的 `version` 行，**保留我们自己的序列**（`forkedFrom` 由 CI 自动写）。
+2. **上游自己实现了 pin / 收藏**（维护者多次提到要"重新设计会话组织"）：**立刻停用我们的补丁**，
+   否则两套置顶逻辑会打架。做法：合并后
+   ```bash
+   grep -rni "pinned\|favorite\|archive" lib components app | grep -v pin-order | grep -v pin-store
+   ```
+   有实质命中就把 `feat/pin` 那个 commit 从 main 上 revert 掉，`package.json` 只保留包名与更新检查两处改动，
+   继续跟上游发版。这样 fork 退化成"官方包的镜像发布渠道"，仍然自洽。
+3. **上游删掉/改名了我们依赖的函数**：锚点测试会红，这是**故意设计**的失败 —— 它宁可挡住发版，
+   也不发一个"pin 已经静默失效但没人知道"的版本。修法是把接缝搬到新位置，并同步更新
+   `lib/pin-fork-anchors.test.mjs` 与 §2 的清单。
+
+**出问题怎么退**：
+
+```powershell
+npm i -g @pricening/pi-web@0.9.6 --registry=https://registry.npmjs.org/   # 回到已知好的版本
+```
+置顶数据存在 `~/.pi/agent/pi-web/pins.json`，**与包版本无关**，回退不丢数据；GitHub Release 上每个版本的 tarball 永久保留，可离线安装。
+
+### 12.2 我自己又有了新需求，怎么做？
+
+**流程**（一个功能 = 一个分支 = 一个 commit）：
+
+```bash
+git checkout -b feat/<名字>        # 不要混进 feat/pin-project-and-session
+# ...写代码...
+npm run lint && npx tsc --noEmit && npm test     # 不要在本地 npm run build（Windows 会 OOM，见 §5.1）
+git push -u origin feat/<名字>      # 开 PR，让 CI 在 ubuntu 上跑一遍（白捡 Linux 覆盖）
+```
+合并进 main 后 CI 会自动发版；先升一台 canary，再改其余机器的 `PI_WEB_PIN`。
+
+**代码放哪里**（§3 的可执行版，按优先级）：
+
+| 顺序 | 做法 | 理由 |
+|---|---|---|
+| 1 | 新逻辑开**新文件** | 永不冲突 |
+| 2 | 需要服务端状态 → 写 `~/.pi/agent/pi-web/<名字>.json`，抄 `lib/pin-store.ts`（锁 + 原子写 + 指纹缓存） | 与 pi 共享目录同生命周期，备份/迁移一起走 |
+| 3 | 需要改行为 → 找**冷文件**做接缝（`lib/session-family.ts`、`lib/project-groups.ts`、`lib/app-update.ts` 等，90 天 1 次提交） | 冲突概率极低 |
+| 4 | 实在要动热文件（`SessionSidebar.tsx` 48 次/90天、`AppShell.tsx` 74 次、`ChatWindow.tsx` 86 次）→ 只留"接线"，每处加 `// [<功能>-fork]` 标记 | 把冲突面压到几十行内 |
+| 5 | **绝不**：往 `lib/i18n/messages/*.ts` 加 key、往 `lib/types.ts` 加字段、写 `settings.json`/`auth.json`、改 `sessions/` 内容、伪造 `modified` | 前两个是最热文件会天天冲突；后三个破坏"与本地 pi 共享"的设计（§8） |
+
+**每个新功能必须配套的四件事**：
+
+1. 纯逻辑抽成无依赖模块（能被浏览器 bundle import：不出现 `node:fs`/`next/server`）
+2. 单元测试 + **一个锚点测试**（照 `lib/pin-fork-anchors.test.mjs` 写，断言接缝还在）
+3. 更新 `docs/FORK.md`：§2 改动清单、§10 已知取舍
+4. 若引入新的服务端状态文件，在 §8 的边界表里登记它的路径与理由
+
+**判断"这个需求值不值得做"**：如果它要求重写热文件的大块逻辑（例如给虚拟化列表加分区标题），
+先估冲突成本。我们已经因此放弃过一次（见 §10），这是合理的取舍，不是失败。
+
+**不再依赖上游**：我们不再指望 agegr 接受任何 PR（历史上 pin/收藏类 5 个社区 PR 全部被关闭未合并）。
+fork 就是终点，功能对不对由我们自己的 CI 门禁和生产机说了算。
