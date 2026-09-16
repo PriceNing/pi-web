@@ -41,7 +41,10 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 | `hooks/usePins.ts` | 客户端状态：挂载时拉一次，之后采纳轮询捎带的 payload；乐观更新 + 失败回滚 |
 | `components/PinButton.tsx` | 图钉按钮，`action` / `inline` 两种形态 |
 | `scripts/next-version.mjs` | 版本号规则的唯一实现（见 §4） |
-| `lib/pin-*.test.mjs`、`scripts/next-version.test.mjs` | 31 个测试 |
+| `scripts/set-forked-from.mjs` | 维护 `package.json.forkedFrom`，记录对应哪个上游构建（见 §5.2） |
+| `scripts/deploy-pi-web.mjs` | 生产机 status / install / rollback，强制精确版本 + 显式 registry（见 §7.1） |
+| `scripts/pi-web-start.bat` | Windows 常驻启动器（含 `PI_WEB_PIN` 锁版本），由计划任务调用（见 §7.2） |
+| `lib/pin-*.test.mjs`、`scripts/*.test.mjs` | 43 个测试 |
 
 **对上游文件的改动（全部带 `// [pin-fork]` 标记）**
 
@@ -111,40 +114,67 @@ Tag 约定：
 
 ## 5. 发布流程
 
-### 5.1 首版（由 CI 发，**不要**在 Windows 本地发）
+### 5.1 发布通道：OIDC（当前状态 —— 仓库内**没有任何 secret**）
 
-> **实测环境限制**：`npm run build`（webpack 生产构建）在本机 Windows 上会 OOM ——
+已实测确认（v0.9.6）：在 `gh secret list` 为空的情况下，CI 仍成功发出
+`+ @pricening/pi-web@0.9.6`，且走的是 `尝试 Trusted Publishing (OIDC)` 分支。
+即：无 token、不会过期、附带 provenance 证明，也不受 npm「2027-01 起绕过 2FA 的
+granular token 不得直接发布」影响 —— 我们本来就不走那条路。
+
+> **为什么不在本地发（实测）**：`npm run build`（webpack 生产构建）在本机 Windows 上会 OOM ——
 > 默认 4 GB 堆约 3.5 分钟崩一次；给到 `--max-old-space-size=8192` 与 `12288` 时，
-> 分别在约 14 分钟后仍因堆耗尽失败（`Ineffective mark-compacts near heap limit`）。
-> 同一份代码在 ubuntu-latest 上约 2 分钟构建完成（上游 `ci.yml` 的 e2e job 就是证据）。
-> **结论：构建与发布只在 CI 里做。** 本地只做 `npm run dev` 预览与 `npm test`。
+> 约 14 分钟后仍因堆耗尽失败（`Ineffective mark-compacts near heap limit`）。
+> 同一份代码在 ubuntu-latest 上约 2 分钟构建完成。
+> **结论：构建与发布只在 CI 里做**，本地只跑 `npm run dev` 预览与 `npm test`。
 
-npm 的 Trusted Publishing 要在 npmjs.com 的**包页面**上配置，而包页面只有发布过之后才存在，
-所以**首版用一次 `NPM_TOKEN`**，之后切到 OIDC：
+信任关系配置（npm 包页面 → Settings → Trusted publishing；**建好不能改，只能删了重建**）：
 
-1. 在 npm 建 granular token：权限 `Read and write (publish and stage)`、scope 限定 `@pricening`、
-   **不填 IP 白名单**（Actions 出口 IP 会变）。
-2. `gh secret set NPM_TOKEN --repo PriceNing/pi-web`（交互粘贴，别让 token 进聊天记录）。
-3. 手动触发 `Sync upstream & publish fork` workflow（`force_publish` 可选）。
-4. 首版上线后去包页面配 Trusted Publishing，然后**删掉 `NPM_TOKEN` secret**，
-   CI 自动走 OIDC 分支（见 `sync-upstream.yml` 的发布步骤）。
+| 字段 | 值 |
+|---|---|
+| Organization or user | `PriceNing` |
+| Repository | `pi-web` |
+| Branch | `main` |
+| Workflow filename | `sync-upstream.yml` ← **只填文件名，大小写敏感，不带路径** |
+| Environment name | 留空 |
+| **Allow npm publish** | ☑️ 必须勾（不勾则只允许 `npm stage publish`） |
 
-> ⚠️ **2FA 实测结论（踩过两次才摸清）**：账号开启"发布需要 2FA"后——
-> - 不勾 Bypass 2FA 的 granular token 发布 → `403 ... bypass 2fa enabled is required to publish`
-> - web login 拿到的 CLI token 改 dist-tag → 同样 `403`
-> - 所以**破冰首版必须用一次性 bypass token**；发完立刻 revoke 该 token 并删掉 secret。
->   （npm 公告：2027-01 起绕过 2FA 的 granular token 不能再直接发布，但我们只用它破冰一次。）
+#### 历史：当初如何破冰（重建时参考，已完成）
 
-### 5.2 之后（CI 自动，`.github/workflows/sync-upstream.yml`）
+Trusted Publishing 要在**包页面**上配置，而包页面只有发布过一次之后才存在，所以上面这条路
+需要一次性破冰：
 
-每天 14:30（北京时间）+ 可手动触发：
+1. 建一个**勾选 Bypass 2FA** 的 granular token（普通 token 会被账号 2FA 策略以 `403` 拒发）
+2. `gh secret set NPM_TOKEN` → 手动触发 workflow 发首版
+3. 去包页面配好 Trusted Publishing → `gh secret delete NPM_TOKEN` → 在 npm 页面 revoke 该 token
+4. 再触发一次发版，确认日志是 OIDC 分支且没有走兜底 —— 到这一步才算真正拆掉梯子
+
+> 两个花了很久才定位的坑：
+> - **不勾 bypass 的 token 发不了**：`403 ... bypass 2fa enabled is required to publish packages`；
+>   同理 web login 的 CLI token 也改不了 dist-tag（实测 403）。副作用：stale 的 `next: 0.9.1`
+>   tag 现在删不掉，只能忽略（没人会装 `@next`，且 0.9.1 也是合法构建）。
+> - **Node 22 自带的 npm 10.x 没有 OIDC 代码路径**，`npm publish --provenance` 只会报 `ENEEDAUTH`，
+>   现象和「trusted publisher 没配对」完全一样。workflow 已固定先 `npm install -g npm@11` 并打印版本。
+
+### 5.2 日常：CI 自动同步 + 发版（`.github/workflows/sync-upstream.yml`）
+
+每天 14:30（北京时间）+ 可手动触发（`force_publish` 可跳过「无新东西」判断）：
 
 ```
-fetch upstream → merge → npm ci → lint → tsc → npm test（含锚点测试）
-→ 算版本 → next build → npm publish（latest）→ npm pack → 打 tag → GitHub Release（附 tarball）→ push main
+fetch upstream → merge → 写 forkedFrom → npm ci → lint → tsc → npm test（含锚点测试）
+→ 算版本 → 升级 npm → next build → npm publish（OIDC）→ npm pack → 打 tag → Release（附 tarball）→ push main
 ```
 
-任何一步失败：**不推送、不发版**。合并冲突会在 CI 里明确列出可能涉及的文件。
+要点：
+
+- 任何一步失败：**不推送、不发版**（已实战验证：某次发布成功但 Release 步骤失败时，
+  tag 与 main 都没被动过，失败是干净的）。
+- **`forkedFrom` 自动维护**：上游会提交代码而不 bump 自己的版本（HEAD 一直在动而 version
+  停在 0.9.1），所以「对应哪个上游构建」只能靠这个字段记录，手写一天就过期。
+  由 `scripts/set-forked-from.mjs` 负责。
+- **不会重复发空版**：只有「上游有新提交」或「仓库版本 ≠ 已发布版本」才发。这里曾写错成
+  比较 `next` 与 `published`，而版本规则保证 `next` 永远更大，会导致每天发一个内容相同的空版本。
+- **OIDC 优先，失败不静默降级**：兜底分支只在 `NPM_TOKEN` 存在时才生效；现在没有 secret，
+  所以 OIDC 一失败就直接变红，不会默默发出一个没有 provenance 的包而无人察觉。
 
 ### 5.3 灰度：放在安装层，不放在 registry tag 层
 
@@ -291,12 +321,24 @@ pin 数据落在 `~/.pi/agent/pi-web/pins.json`：备份/迁移 agentDir 时自�
 
 ---
 
-## 9. npm 认证政策（会过期的部分）
+## 9. npm 认证政策（当前状态）
 
-- 本地发布：**web login**（`npm login --registry=https://registry.npmjs.org/ --auth-type=web`），2FA 正常交互，不绕过。
-- CI 首选：**Trusted Publishing (OIDC)**。在 npm 包页面绑定 GitHub `PriceNing/pi-web` + workflow 文件 + branch，CI 里 `npm publish --provenance`，**无需 secret、永不过期**。
-- CI 兜底：`NPM_TOKEN` secret（granular token，权限 `publish and stage`、scope 限定 `@pricening`、**不要勾 Bypass 2FA**、**不要填 IP 白名单**）。
-  ⚠️ npm 官方公告：**2027 年 1 月起绕过 2FA 的 granular token 不再允许直接发布**。所以 token 只是过渡，OIDC 是终态。
+| 场景 | 用什么 | 备注 |
+|---|---|---|
+| CI 发版 | **Trusted Publishing (OIDC)** —— 唯一通道 | 无 secret、无过期、带 provenance。已在 v0.9.6 实测（仓库 secrets 为空仍发布成功） |
+| 本机应急发布 | **web login**：`npm login --registry=https://registry.npmjs.org/ --auth-type=web` | 2FA 走交互（通行密钥），不绕过。注意本机 `~/.npmrc` 若指向只读镜像，必须显式带 `--registry` |
+| CI 兜底 token | **当前不存在**（已删除并 revoke） | 重建见 §5.1「历史：如何破冰」 |
+
+三条实测出来的硬约束（别凭直觉配置）：
+
+1. **账号开启"发布需要 2FA"后，普通 granular token 发不了**（`403 ... bypass 2fa enabled is
+   required to publish packages`）。能发的只有勾了 Bypass 2FA 的 token —— 而 npm 已公告
+   **2027-01 起这类 token 不再允许直接发布**。所以"建个普通 token 当兜底"这个直觉是错的，
+   兜底要么用 bypass token（临时、用完即撤），要么没有。
+2. **dist-tag 操作同样要 2FA 级凭据**：web login 的 CLI token 执行 `npm dist-tag rm` 实测 403。
+   因此灰度不能设计成"CI 发 `next`、人工提升 `latest`"（提升这步没人能做），只能放在安装层（§5.3）。
+3. **Node 22 自带 npm 10.x 不支持 OIDC**，`npm publish --provenance` 报 `ENEEDAUTH`，与"没配好
+   trusted publisher"现象相同。CI 里必须先 `npm install -g npm@11`。
 
 ---
 
@@ -309,6 +351,8 @@ pin 数据落在 `~/.pi/agent/pi-web/pins.json`：备份/迁移 agentDir 时自�
 | 归档（archive） | 上游 #406 提过，本 fork 暂未实现 |
 | 删除项目路径 / 隐藏项目 | 项目列表由会话派生，没有独立注册表；上游维护者明确认为不需要（#543） |
 | 多服务器间同步 pin | 我们的 pi-web 只有一台服务器，服务端存储已满足跨设备。若将来多实例，把 `~/.pi/agent` 放共享存储即可 |
+| 清掉 npm 上 stale 的 `next: 0.9.1` tag | 需要 2FA 级凭据，而 bypass token 已 revoke、CLI 又只能吃 TOTP（我们用的是通行密钥）。影响为零，见 §9 第 2 条 |
+| 本地 Windows 构建 | `npm run build` 会 OOM（§5.1）。构建与发布只在 CI 做，本地只跑 dev 与测试 |
 
 ---
 
@@ -328,3 +372,4 @@ npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 全绿
 2. 会话行：hover 时图钉与重命名/删除同框；已置顶行常亮
 3. 手机/Pad 打开同一实例：一端 pin，另一端 ≤2.5 秒自动置顶
 4. `~/.pi/agent/pi-web/pins.json` 内容符合预期；删掉一个已 pin 会话后其记录消失
+5. `node scripts/deploy-pi-web.mjs status` 能看到新版本；`node -p "require('./package.json').forkedFrom.commit"` 已指向上游最新 commit；CI 发布日志出现 `✅ OIDC 发布成功`（不是兜底分支）

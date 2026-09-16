@@ -73,9 +73,18 @@ jobs:
           if ! git merge --no-edit upstream/main; then
             git merge --abort
             conflicted=$(git diff --name-only "$(git merge-base HEAD upstream/main)" upstream/main | tr '\n' ' ')
-            echo "::error title=上游合并冲突::与 upstream/main 冲突，可能涉及：$conflicted 。请本地执行： git fetch upstream && git merge upstream/main 手工解决后推送。本次不发版。"
+            echo "::error title=上游合并冲突::与 upstream/main 冲突，可能涉及：$conflicted 。若冲突在 package.json 的 version 行，保留我们自己的序列（取较大值）即可，forkedFrom 由下面的步骤自动写。解决方式： git fetch upstream && git merge upstream/main 手工解决后推送。本次不发版。"
             exit 1
           fi
+
+      - name: 记录上游基线（forkedFrom）
+        run: |
+          # 上游会提交代码但不 bump 自己的 version（它停在 0.9.1 时 HEAD 一直在动），
+          # 所以“对应哪个上游构建”只能靠这个字段记录，靠手写一天就过期。
+          upstream_version=$(git show upstream/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          upstream_commit=$(git rev-parse upstream/main)
+          echo "上游: version=${upstream_version} commit=${upstream_commit}"
+          node scripts/set-forked-from.mjs --version "$upstream_version" --commit "$upstream_commit"
 
       - name: 安装依赖
         run: npm ci
