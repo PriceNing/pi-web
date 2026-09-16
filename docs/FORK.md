@@ -195,19 +195,22 @@ git push origin main
 ## 7. 生产机部署与回滚
 
 ```powershell
-# 安装/升级（必须显式指定 registry：国内镜像对新 scoped 包可能尚未回源）
+# 推荐用本仓库的助手：它会强制精确版本、显式 registry，并提醒官方包冲突
+node scripts/deploy-pi-web.mjs status            # 本机版本 + 最新可装版本
+node scripts/deploy-pi-web.mjs install 0.9.2     # 安装/升级（canary 一台）
+node scripts/deploy-pi-web.mjs rollback 0.9.1    # 回滚（同样是精确版本）
+
+# 它等价于：
 npm i -g @pricening/pi-web@0.9.2 --registry=https://registry.npmjs.org/
 
 # 拉不到 npm 时，用 GitHub Release 的 tarball 兜底
 npm i -g .\pricening-pi-web-0.9.2.tgz
-
-# 回滚
-npm i -g @pricening/pi-web@0.9.1 --registry=https://registry.npmjs.org/
 ```
 
 规定：
 
 - **精确版本号安装**，禁止 `^` / `latest` 落到运维脚本里；版本记录在部署仓库里，让"谁升到了哪"可审计。
+  `deploy-pi-web.mjs install` 会直接拒收非 `x.y.z` 的参数。
 - 同一台机器**不要同时安装** `@agegr/pi-web` 和 `@pricening/pi-web`：两个包的 `bin` 都叫 `pi-web`，后装的会覆盖前者。
 - 升级前先停服务，`pi-web` 会 idle 回收 AgentSession，但 `node-pty` 终端会话会断。
 - `PI_WEB_SKIP_VERSION_CHECK=1` 现在**不再是必须**（更新检查已指向我们自己的包），但如果你不希望界面出现任何升级提示，它仍是有效的开关。
