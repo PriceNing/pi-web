@@ -1,4 +1,6 @@
 import type { SessionInfo } from "./types";
+// [pin-fork]
+import { comparePinnedFirst } from "./pin-order";
 
 export interface SessionFamily {
   root: SessionInfo;
@@ -43,7 +45,11 @@ function resolveFamilyRoots(sessions: readonly SessionInfo[]): Map<string, strin
 }
 
 /** Groups visible main/fork sessions with every persisted subagent descendant. */
-export function listSessionFamilies(sessions: readonly SessionInfo[]): SessionFamily[] {
+export function listSessionFamilies(
+  sessions: readonly SessionInfo[],
+  // [pin-fork] Optional pin set: pinned families come first, then activity order.
+  pinnedSessionIds?: ReadonlySet<string>,
+): SessionFamily[] {
   const rootsBySessionId = resolveFamilyRoots(sessions);
   const families = new Map<string, SessionFamily>();
 
@@ -65,7 +71,10 @@ export function listSessionFamilies(sessions: readonly SessionInfo[]): SessionFa
     if (session.modified > family.latestModified) family.latestModified = session.modified;
   }
 
-  return [...families.values()].sort((a, b) => b.latestModified.localeCompare(a.latestModified));
+  return [...families.values()].sort((a, b) => comparePinnedFirst(
+    Boolean(pinnedSessionIds?.has(a.root.id)),
+    Boolean(pinnedSessionIds?.has(b.root.id)),
+  ) || b.latestModified.localeCompare(a.latestModified));
 }
 
 export function getSessionFamily(

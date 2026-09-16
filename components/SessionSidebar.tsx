@@ -13,6 +13,9 @@ import { useI18n } from "@/hooks/useI18n";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { SessionSearch } from "./SessionSearch";
+// [pin-fork]
+import { PinButton } from "./PinButton";
+import { usePins } from "@/hooks/usePins";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -371,6 +374,8 @@ function PiWebTitle() {
 
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
+  // [pin-fork] Server-owned pin state; applyPayload adopts the poll's copy.
+  const { sets: pinSets, applyPayload: applyPinPayload, toggle: togglePin } = usePins();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
   const sessionListVersionRef = useRef<number | null>(null);
@@ -542,9 +547,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           sessionListVersion: number;
           runningSessionIds?: string[];
           completionNotificationSuppressedSessionIds?: string[];
+          // [pin-fork]
+          pins?: unknown;
         };
         if (stopped || controller !== current) return;
         runningPollAuthoritativeRef.current = true;
+        // [pin-fork] Keeps every open tab in sync with the server pin store.
+        applyPinPayload(data.pins);
         currentSuppressedCompletionSessionIdsRef.current = new Set(
           data.completionNotificationSuppressedSessionIds ?? [],
         );
@@ -579,7 +588,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       controller?.abort();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [loadSessions]);
+  }, [applyPinPayload, loadSessions]);
 
   useEffect(() => {
     onRunningSessionIdsChange?.(runningSessionIds);
@@ -945,7 +954,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onNewSession?.(tempId, selectedCwd);
   }, [selectedCwd, onNewSession]);
 
-  const recentProjects = getRecentProjects(allSessions);
+  const recentProjects = getRecentProjects(allSessions, pinSets.projects);
   const showProjectFilter = recentProjects.length > 8;
   const visibleProjects = projectFilter.trim()
     ? recentProjects.filter((project) => project.root.toLowerCase().includes(projectFilter.trim().toLowerCase()))
@@ -1003,7 +1012,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }
       : null);
 
-  const sessionFamilies = listSessionFamilies(filteredSessions);
+  const sessionFamilies = listSessionFamilies(filteredSessions, pinSets.sessions);
 
   const virtualIndices = getSessionListIndices(
     sessionFamilies.length,
@@ -1237,6 +1246,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     {project.key !== selectedProject?.key && <span style={{ width: 10, flexShrink: 0 }} />}
                     <PathLabel text={displayCwd(project.root, homeDir)} style={{ flex: 1 }} />
                     {showProjectActivity(projectActivity.get(project.key), t)}
+                    {/* [pin-fork] Row itself is a <button>, so render a span role=button. */}
+                    <PinButton
+                      as="span"
+                      variant="inline"
+                      kind="project"
+                      id={project.key}
+                      pinned={pinSets.projects.has(project.key)}
+                      onToggle={togglePin}
+                    />
                   </button>
                 ))}
                 {visibleProjects.length === 0 && projectFilter.trim() && (
@@ -1726,6 +1744,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                       onSessionDeleted?.(id);
                       loadSessions();
                     }}
+                    // [pin-fork]
+                    pinned={pinSets.sessions.has(family.root.id)}
+                    onTogglePin={togglePin}
                   />
                 </div>
               );
@@ -2003,6 +2024,9 @@ function SessionItem({
   hasChildren = false,
   collapsed = false,
   onToggleCollapse,
+  // [pin-fork]
+  pinned = false,
+  onTogglePin,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -2015,6 +2039,9 @@ function SessionItem({
   hasChildren?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  // [pin-fork]
+  pinned?: boolean;
+  onTogglePin?: (kind: "session" | "project", id: string, pinned: boolean) => Promise<boolean> | void;
 }) {
   const { locale, t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -2275,6 +2302,19 @@ function SessionItem({
                 <polyline points="2 3.5 5 6.5 8 3.5" />
               </svg>
             </button>
+          )}
+
+          {/* [pin-fork] Same box as rename/delete. It lives outside the hover
+              group on purpose so this patch never changes when those upstream
+              buttons appear; on touch (no hover) or when pinned it stays visible. */}
+          {onTogglePin && (
+            <PinButton
+              kind="session"
+              id={session.id}
+              pinned={pinned}
+              hovered={hovered}
+              onToggle={onTogglePin}
+            />
           )}
 
           {/* Action buttons — shown on hover */}
