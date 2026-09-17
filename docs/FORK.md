@@ -44,6 +44,8 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 | `scripts/set-forked-from.mjs` | 维护 `package.json.forkedFrom`，记录对应哪个上游构建（见 §5.2） |
 | `scripts/deploy-pi-web.mjs` | 生产机 status / install / rollback，强制精确版本 + 显式 registry（见 §7.1） |
 | `scripts/pi-web-start.bat` | Windows 常驻启动器（含 `PI_WEB_PIN` 锁版本），由计划任务调用（见 §7.2） |
+| `scripts/bootstrap-production.ps1` | 生产机一键接入：体检 / 装包 / 部署启动器 / 建任务 / 安全切换（见 §7.5） |
+| `scripts/pi-web.service` | Linux systemd 用户服务模板（见 §7.6） |
 | `lib/pin-*.test.mjs`、`scripts/*.test.mjs` | 43 个测试 |
 
 **对上游文件的改动（全部带 `// [pin-fork]` 标记）**
@@ -294,8 +296,8 @@ npm uninstall -g @agegr/pi-web
 npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 ```
 
-为什么不能先装后卸（实测）：两个包的全局 bin 垫片**同名**（`%APPDATA%\npm\pi-web.cmd/.ps1`），
-官方包在位时 `npm i -g @pricening/pi-web` 会**直接失败**：
+为什么不能先装后卸（**Windows 与 Linux 均已实测**）：两个包的全局 bin 垫片**同名**（`%APPDATA%\npm\pi-web.cmd/.ps1`），
+官方包在位时 `npm i -g @pricening/pi-web` 会**直接失败**（Linux 上是同一个坑，只是形式为 `<npm prefix>/bin/pi-web` 符号链接）：
 
 ```
 npm error EEXIST: File already exists  →  Remove the existing file and try again,
@@ -393,6 +395,39 @@ schtasks /Run /TN pi-web-server
 - `-RestartNow` 的顺序是：停任务 → 停官方进程 → 起 fork → **确认 fork 在监听** → 才卸官方包 → 再 `npm rebuild -g` 补回被一起删掉的 `pi-web` 垫片；fork 起不来就抛错并保留官方包与备份，绝不留下"两头都没了"的状态
 
 > ⚠️ 如果你正是通过那台机器的 pi-web 在操作它，`-RestartNow` 等于自断。那种情况改用一次性计划任务在进程外执行（本次主机切换就是这么做的），或者直接重启机器。
+
+---
+
+### 7.6 Linux 机器：systemd 用户服务（无需 launcher）
+
+模板在 `scripts/pi-web.service`。切换一台已装官方包的 Linux 机器的完整顺序（已在真实机器上验证）：
+
+```bash
+# 1) 装 fork —— 官方包在位时必须 --force，否则 EEXIST 失败
+npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/ --force
+readlink -f ~/.npm-global/bin/pi-web          # 应指向 @pricening/pi-web/bin/pi-web.js
+
+# 2) 重启服务并确认是 fork
+systemctl --user restart pi-web
+curl -s http://127.0.0.1:30141/api/pins       # 返回 JSON 才是 fork；404 说明还是官方包
+
+# 3) 才卸官方包
+npm uninstall -g @agegr/pi-web
+
+# 4) 检查链接是否被一起删掉（实测会被删），删了就 rebuild
+[ -e ~/.npm-global/bin/pi-web ] || npm rebuild -g @pricening/pi-web
+systemctl --user restart pi-web && systemctl --user is-active pi-web   # 卸完做一次冷重启验证
+```
+
+要点：
+
+- **`loginctl enable-linger $USER` 是关键**。用户级服务默认只在登录后运行，开了 linger 才真正开机自启。
+- Linux **不需要 launcher 脚本**：systemd 不做 `npm update`，版本天然锁定；升级必须显式
+  `npm i -g @pricening/pi-web@<版本> && systemctl --user restart pi-web`。这等价于 Windows 侧
+  `PI_WEB_PIN` 的效果，无需额外配置。
+- `ExecStart` 指向 npm 全局 bin 的**链接**而非包内绝对路径，这样升级/重装不用改 unit。
+- 快速判断"服务的是哪个构建"：`curl -s http://127.0.0.1:30141/api/pins` —— 官方包没有这个路由，
+  会返回 Next 的 404 HTML。
 
 ---
 
