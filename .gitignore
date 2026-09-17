@@ -42,3 +42,8 @@ yarn-error.log*
 next-env.d.ts
 .factory
 e2e_*.mjs
+
+# [pin-fork] 私有部署清单永不入库（本仓库是公开的）
+*.local.md
+*.local.json
+deploy/
