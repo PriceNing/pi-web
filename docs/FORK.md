@@ -48,6 +48,15 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 
 **动机**：项目和会话一多就找不到。且必须**服务端存储**——localStorage 是每个浏览器一份，PC / 手机 / Pad 三端会各自为政。
 
+### 2.0 补丁全貌（测量于 2026-09-17，重算命令见下）
+
+```bash
+git diff --shortstat upstream/main...HEAD     # 2026-09-17：31 files changed, +2908 / -19
+git diff --name-status upstream/main...HEAD   # 新增 20 个文件；修改 11 个上游文件
+grep -c "pin-fork" components/SessionSidebar.tsx   # 热文件里的标记数（当前 9 处）
+node --experimental-strip-types --test lib/pin-*.test.mjs scripts/*.test.mjs   # 43 tests 全绿
+```
+
 **新增文件（永不与上游冲突）**
 
 | 文件 | 职责 |
@@ -57,25 +66,32 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 | `app/api/pins/route.ts` | `GET` 读、`POST` 切换（鉴权由 `proxy.ts` 的 `/api/:path*` matcher 自动覆盖） |
 | `hooks/usePins.ts` | 客户端状态：挂载时拉一次，之后采纳轮询捎带的 payload；乐观更新 + 失败回滚 |
 | `components/PinButton.tsx` | 图钉按钮，`action` / `inline` 两种形态 |
-| `scripts/next-version.mjs` | 版本号规则的唯一实现（见 §4） |
-| `scripts/set-forked-from.mjs` | 维护 `package.json.forkedFrom`，记录对应哪个上游构建（见 §5.2） |
+| `lib/pin-order.test.mjs`、`lib/pin-store.test.mjs`、`lib/pin-fork-anchors.test.mjs`、`lib/pin-fork-seams.test.mjs` | pin 的纯逻辑 / 存储 / **锚点** / 排序接缝测试 |
+| `scripts/next-version.mjs`（+测试） | 版本号规则的唯一实现（见 §4） |
+| `scripts/set-forked-from.mjs`（+测试） | 维护 `package.json.forkedFrom`，记录对应哪个上游构建（见 §5.2） |
 | `scripts/deploy-pi-web.mjs` | 生产机 status / install / rollback，强制精确版本 + 显式 registry（见 §7.1） |
 | `scripts/pi-web-start.bat` | Windows 常驻启动器（含 `PI_WEB_PIN` 锁版本），由计划任务调用（见 §7.2） |
 | `scripts/bootstrap-production.ps1` | 生产机一键接入：体检 / 装包 / 部署启动器 / 建任务 / 安全切换（见 §7.5） |
 | `scripts/pi-web.service` | Linux systemd 用户服务模板（见 §7.6） |
-| `lib/pin-*.test.mjs`、`scripts/*.test.mjs` | 43 个测试 |
+| `.github/workflows/sync-upstream.yml` | 同步 + 发版流水线（见 §5.2） |
+| `.gitattributes` | `*.bat` / `*.cmd` 存 LF、签出 CRLF（cmd.exe 解析批处理对 LF 不稳） |
+| `docs/FORK.md` | 本文件 |
 
-**对上游文件的改动（全部带 `// [pin-fork]` 标记）**
+**对上游文件的改动**（11 个文件；上游既有文件里共 21 处 `[pin-fork]` 标记。例外是 `package.json`：包名/版本/`publishConfig`/`forkedFrom`/脚本 本身就是自说明的，不加标记）
 
 | 文件 | 上游改动频率 | 我们改了什么 |
 |---|---|---|
-| `components/SessionSidebar.tsx` | 高（48 次/90 天） | 约 45 行：import、`usePins()`、轮询采纳 pins、两处排序传参、会话行与项目行各一个 `<PinButton>`、`SessionItem` 两个新 prop |
+| `components/SessionSidebar.tsx` | 高（48 次/90 天） | **+43 / −3**：import、`usePins()`、轮询采纳 pins、两处排序传参、会话行与项目行各一个 `<PinButton>`、`SessionItem` 两个新 prop |
 | `lib/session-family.ts` | 极低（1 次） | 可选参数 `pinnedSessionIds` + 排序改为 pinned 优先 |
 | `lib/project-groups.ts` | 极低（1 次） | 可选参数 `pinnedProjectKeys` + 排序改为 pinned 优先 |
 | `app/api/agent/running/route.ts` | 低（3 次） | 响应里捎带 `pins` |
 | `app/api/sessions/route.ts` | 低（5 次） | 列表加载时 `prunePins()` 清理孤儿 |
-| `lib/app-update.ts` / `app/api/app-update/route.ts` | 极低 | 更新检查指向我们的包（见 §2.2） |
-| `components/SessionSidebar.test.mjs`、`lib/app-update.test.mjs` | 中 | 上游两条断言按新签名/新 URL 更新 |
+| `lib/app-update.ts`、`app/api/app-update/route.ts` | 极低（1、2 次） | 更新检查指向我们的包（见 §2.2） |
+| `components/SessionSidebar.test.mjs` | 中（13 次） | 上游一条断言按新签名更新 |
+| `lib/app-update.test.mjs` | 低 | 上游一条断言按新 Release URL 更新 |
+| `package.json` | 中 | 包名、`publishConfig`、`forkedFrom`、`release:pin*` 脚本、测试 glob 加 `scripts/` |
+| `.gitignore` | 低 | 拦住私有部署清单（`*.local.md`、`*.local.json`、`deploy/`，见 §0） |
+
 
 **行为规定**
 
@@ -83,8 +99,8 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 - 项目 pin 的 key 用服务端算出的 `projectKey`（`workspaceKeyOf()`），**不用路径字符串**——Windows 大小写、分隔符、UNC 已由上游归一化。
 - 会话 pin 的 key 是 `session.id`：改名保留、**fork 不继承**、删除即清理。
 - 项目下已无会话时，其 pin 自动清理（与上游"项目列表只含有会话的目录"的立场一致）。
-- 图钉**不受 hover 门控**（触屏没有 hover），视觉规格与相邻的重命名/删除按钮完全一致；已置顶时常亮作为标记。
-- 跨设备同步**不开新连接**：蹭侧栏已有的 2.5 秒 `GET /api/agent/running` 轮询，所以任何一端 pin，其他端 ≤2.5 秒收敛。
+- 图钉与相邻的重命名/删除按钮**同一套视觉规格与出现规则**：桌面端在 hover 时随该组一起出现，**已置顶的行则常亮**作为标记；触屏设备（`useIsMobile()`）始终可见，因为没有 hover 就永远点不到。
+- 跨设备同步**不开新连接**：蹭侧栏已有的 2.5 秒 `GET /api/agent/running` 轮询（`RUNNING_SESSIONS_POLL_MS = 2500`），所以任何一端 pin，其他端 ≤2.5 秒收敛。**限定条件**：该轮询只在标签页可见时进行（`document.visibilityState !== "visible"` 时暂停），所以被切到后台的标签页会在重新获得可见时收敛，而不是准时 2.5 秒。
 
 ### 2.2 更新检查重定向
 
@@ -94,7 +110,7 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 
 ## 3. 补丁纪律（加新功能时必须遵守 —— 本节是唯一权威出处）
 
-上游非常活跃（近 90 天 **568 次提交**，约 6 次/天），所以**"改动放哪里"直接决定以后同步是
+上游非常活跃（近 90 天 **573 次提交**，约 6 次/天，测量于 2026-09-17），所以**"改动放哪里"直接决定以后同步是
 5 分钟还是 5 小时**。这一节是硬约束，不是建议。
 
 ### 3.1 流程：一个功能 = 一个分支 = 一个 commit
@@ -119,18 +135,24 @@ git push -u origin feat/<名字>       # 开 PR，让 CI 在 ubuntu 上跑一遍
 | 4 | 实在要动**热文件** → 只允许"接线"级改动，每处加 `// [<功能>-fork]` 标记 | 把冲突面压到几十行内 |
 | 5 | **绝不触碰**（见下表） | — |
 
-热文件黑名单（近 90 天被改次数）：
+热文件黑名单（近 90 天被改次数，测量于 2026-09-17；**这些数字会漂移，别照抄，要重算**）：
 
-```
-ChatWindow.tsx 86   AppShell.tsx 74   lib/rpc-manager.ts 72   useAgentSession.ts 67
-lib/i18n/messages/zh-CN.ts 58   SessionSidebar.tsx 48   lib/session-reader.ts 31   lib/types.ts 20
+```bash
+git fetch upstream
+for f in components/ChatWindow.tsx components/AppShell.tsx lib/rpc-manager.ts hooks/useAgentSession.ts lib/i18n/messages/zh-CN.ts components/SessionSidebar.tsx lib/session-reader.ts lib/types.ts lib/session-family.ts lib/project-groups.ts lib/app-update.ts; do
+  n=$(git log --since='90 days ago' --oneline upstream/main -- "$f" | wc -l)
+  echo "$n  $f"
+done | sort -rn
+# 2026-09-17 实测（次数 文件）：90 ChatWindow / 76 AppShell / 73 rpc-manager / 67 useAgentSession
+#   / 63 i18n zh-CN / 48 SessionSidebar / 31 session-reader / 20 types
+#   / 1 session-family / 1 project-groups / 1 app-update   ← 后三个就是我们的接缝，几乎不动
 ```
 
 **绝对禁止清单**：
 
 | 禁止 | 原因 |
 |---|---|
-| 往 `lib/i18n/messages/*.ts` 加 key | 最热文件之一（61 次/90天）且有 key 集对齐测试，每次同步必冲突。文案自带在组件里，用 `useI18n()` 的 `locale` 选 |
+| 往 `lib/i18n/messages/*.ts` 加 key | 最热文件之一（zh-CN 63 次、en 62 次/90 天）且有 key 集对齐测试，每次同步必冲突。文案自带在组件里，用 `useI18n()` 的 `locale` 选 |
 | 往 `lib/types.ts` 加字段 | 20 次/90天。要附加信息就在 API 层做结构类型转换或另建类型 |
 | 写 `settings.json` / `auth.json` / `models.json` | 归 pi CLI 所有，两边写会互相覆盖 |
 | 改 `sessions/` 下任何内容 | 破坏"与本地 pi 共享"的设计（§8） |
@@ -228,7 +250,8 @@ Trusted Publishing 要在**包页面**上配置，而包页面只有发布过一
 
 ```
 fetch upstream → merge → 写 forkedFrom → npm ci → lint → tsc → npm test（含锚点测试）
-→ 算版本 → 升级 npm → next build → npm publish（OIDC）→ npm pack → 打 tag → Release（附 tarball）→ push main
+→ 算版本 → 升级 npm → next build → npm publish（OIDC）→ npm pack
+→ 打 tag 并 push main → GitHub Release（附 tarball）
 ```
 
 要点：
@@ -255,7 +278,7 @@ fetch upstream → merge → 写 forkedFrom → npm ci → lint → tsc → npm 
 
 ```powershell
 # ① 只升 canary 一台（显式版本号）
-npm i -g @pricening/pi-web@0.9.2 --registry=https://registry.npmjs.org/
+npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 # ② 用一天，确认没问题
 # ③ 再改部署脚本里的 PINNED_VERSION，其余机器才会升
 ```
@@ -296,14 +319,14 @@ git push origin main
 ```powershell
 # 推荐用本仓库的助手：它会强制精确版本、显式 registry，并提醒官方包冲突
 node scripts/deploy-pi-web.mjs status            # 本机版本 + 最新可装版本
-node scripts/deploy-pi-web.mjs install 0.9.5     # 安装/升级（canary 一台）
-node scripts/deploy-pi-web.mjs rollback 0.9.4    # 回滚（同样是精确版本）
+node scripts/deploy-pi-web.mjs install <版本>   # 安装/升级（canary 一台）
+node scripts/deploy-pi-web.mjs rollback <版本>   # 回滚（同样是精确版本）
 
 # 它等价于：
-npm i -g @pricening/pi-web@0.9.5 --registry=https://registry.npmjs.org/
+npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 
 # 拉不到 npm 时，用 GitHub Release 的 tarball 兜底
-npm i -g .\pricening-pi-web-0.9.5.tgz
+npm i -g .\pricening-pi-web-<版本>.tgz
 ```
 
 从官方版切换过来的正确顺序（**先卸后装**）：
@@ -400,7 +423,7 @@ schtasks /Run /TN pi-web-server
 ```powershell
 .\scripts\bootstrap-production.ps1 -Check        # 只体检，什么都不改
 .\scripts\bootstrap-production.ps1              # 装 fork + 部署启动器 + 建开机任务
-.\scripts\bootstrap-production.ps1 -Pin 0.9.6   # 同上，并锁版本（推荐生产机）
+.\scripts\bootstrap-production.ps1 -Pin <版本>  # 同上，并锁到精确版本（推荐生产机），例：-Pin 0.9.6
 .\scripts\bootstrap-production.ps1 -RestartNow  # 立刻从官方包切到 fork（会断当前 pi-web 会话）
 ```
 
@@ -512,7 +535,7 @@ npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 全绿
 
 1. 侧栏项目下拉：图钉出现、点击置顶、顺序变化、刷新后仍在
 2. 会话行：hover 时图钉与重命名/删除同框；已置顶行常亮
-3. 手机/Pad 打开同一实例：一端 pin，另一端 ≤2.5 秒自动置顶
+3. 手机/Pad 打开同一实例：一端 pin，另一端在**标签页可见时** ≤2.5 秒自动置顶（切到后台的标签页要等回到前台）
 4. `~/.pi/agent/pi-web/pins.json` 内容符合预期；删掉一个已 pin 会话后其记录消失
 5. `node scripts/deploy-pi-web.mjs status` 能看到新版本；`node -p "require('./package.json').forkedFrom.commit"` 已指向上游最新 commit；CI 发布日志出现 `✅ OIDC 发布成功`（不是兜底分支）
 
@@ -539,7 +562,9 @@ npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 全绿
 2. **上游自己实现了 pin / 收藏**（维护者多次提到要"重新设计会话组织"）：**立刻停用我们的补丁**，
    否则两套置顶逻辑会打架。做法：合并后
    ```bash
-   grep -rni "pinned\|favorite\|archive" lib components app | grep -v pin-order | grep -v pin-store
+   # 只看我们挂接缝的那几个文件，避免上游 "pinned models" 之类无关用词造成误报
+   git grep -in "pinned\|favorite\|archive" upstream/main -- components/SessionSidebar.tsx lib/session-family.ts lib/project-groups.ts lib/types.ts app/api/sessions
+   # 2026-09-17 实测该命令输出为空；若某天有输出，说明上游在自己的实现里碰到了同一块地
    ```
    有实质命中就把 `feat/pin` 那个 commit 从 main 上 revert 掉，`package.json` 只保留包名与更新检查两处改动，
    继续跟上游发版。这样 fork 退化成"官方包的镜像发布渠道"，仍然自洽。
@@ -550,7 +575,7 @@ npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 全绿
 **出问题怎么退**：
 
 ```powershell
-npm i -g @pricening/pi-web@0.9.6 --registry=https://registry.npmjs.org/   # 回到已知好的版本
+npm i -g @pricening/pi-web@<上一个可用版本> --registry=https://registry.npmjs.org/   # 回滚
 ```
 置顶数据存在 `~/.pi/agent/pi-web/pins.json`，**与包版本无关**，回退不丢数据；GitHub Release 上每个版本的 tarball 永久保留，可离线安装。
 
