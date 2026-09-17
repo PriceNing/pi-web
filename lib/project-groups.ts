@@ -16,12 +16,15 @@ export function getRecentProjects(
   // [pin-fork] Optional pin set keyed by project identity: pinned projects come
   // first, and pinned projects keep activity order among themselves.
   pinnedProjectKeys?: ReadonlySet<string>,
+  // [archive-fork] Archived projects stay on disk but drop out of the sidebar.
+  archivedProjectKeys?: ReadonlySet<string>,
 ): RecentProject[] {
   const latestByProject = new Map<string, { root: string; modified: string }>();
   for (const session of sessions) {
     const root = session.projectRoot ?? session.cwd;
     if (!root) continue;
     const key = workspaceKeyOf(session);
+    if (archivedProjectKeys?.has(key)) continue;
     const previous = latestByProject.get(key);
     if (!previous || session.modified > previous.modified) {
       latestByProject.set(key, { root, modified: session.modified });

@@ -16,6 +16,9 @@ import { SessionSearch } from "./SessionSearch";
 // [pin-fork]
 import { PinButton } from "./PinButton";
 import { usePins } from "@/hooks/usePins";
+// [archive-fork]
+import { ArchiveButton } from "./ArchiveButton";
+import { useArchives } from "@/hooks/useArchives";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -376,6 +379,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const { t } = useI18n();
   // [pin-fork] Server-owned pin state; applyPayload adopts the poll's copy.
   const { sets: pinSets, applyPayload: applyPinPayload, toggle: togglePin } = usePins();
+  // [archive-fork] Server-owned archive set; applyPayload adopts the poll's copy.
+  const { set: archiveSet, applyPayload: applyArchivePayload, toggle: toggleArchive } = useArchives();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
   const sessionListVersionRef = useRef<number | null>(null);
@@ -549,11 +554,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           completionNotificationSuppressedSessionIds?: string[];
           // [pin-fork]
           pins?: unknown;
+          // [archive-fork]
+          archives?: unknown;
         };
         if (stopped || controller !== current) return;
         runningPollAuthoritativeRef.current = true;
         // [pin-fork] Keeps every open tab in sync with the server pin store.
         applyPinPayload(data.pins);
+        // [archive-fork]
+        applyArchivePayload(data.archives);
         currentSuppressedCompletionSessionIdsRef.current = new Set(
           data.completionNotificationSuppressedSessionIds ?? [],
         );
@@ -588,7 +597,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       controller?.abort();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [applyPinPayload, loadSessions]);
+  }, [applyArchivePayload, applyPinPayload, loadSessions]);
 
   useEffect(() => {
     onRunningSessionIdsChange?.(runningSessionIds);
@@ -771,10 +780,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         // Session not found — notify parent so it can show the placeholder
         onInitialRestoreDone?.();
       }
-      const projects = getRecentProjects(allSessions);
+      const projects = getRecentProjects(allSessions, undefined, archiveSet);
       if (projects.length > 0) setSelectedCwd(projects[0].root);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
+  }, [allSessions, archiveSet, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
 
   // Prefer an exact UI selection while a refetch is in flight. Once the
   // response catches up, the server-resolved path handles Windows case and
@@ -941,8 +950,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const handleSelectSessionFromList = useCallback((s: SessionInfo, entryId?: string, blockIndex?: number) => {
     setAllSessions((current) => current.some((session) => session.id === s.id) ? current : [s, ...current]);
     if (s.cwd) setSelectedCwd(s.cwd);
+    // [archive-fork] Opening a session from search should surface its project again.
+    const key = workspaceKeyOf(s);
+    if (key && archiveSet.has(key)) void toggleArchive(key, false);
     onSelectSession(s, false, entryId, blockIndex);
-  }, [onSelectSession]);
+  }, [archiveSet, onSelectSession, toggleArchive]);
 
   const handleNewSession = useCallback(() => {
     if (!selectedCwd) return;
@@ -952,16 +964,33 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     onNewSession?.(tempId, selectedCwd);
-  }, [selectedCwd, onNewSession]);
+  }, [onNewSession, selectedCwd]);
 
-  const recentProjects = getRecentProjects(allSessions, pinSets.projects);
+  const recentProjects = getRecentProjects(allSessions, pinSets.projects, archiveSet);
+  const selectedProject = projectFor(selectedCwd);
+  const unarchiveKey = useCallback((key: string | null | undefined) => {
+    if (key && archiveSet.has(key)) void toggleArchive(key, false);
+  }, [archiveSet, toggleArchive]);
+  useEffect(() => {
+    unarchiveKey(validatedProject?.key);
+  }, [unarchiveKey, validatedProject?.key]);
+  const startNewSession = useCallback(() => {
+    // [archive-fork] Working in a project un-archives it: archive means "hide
+    // from the list", not "forbid reuse".
+    unarchiveKey(selectedProject?.key);
+    handleNewSession();
+  }, [handleNewSession, selectedProject, unarchiveKey]);
+  // [archive-fork] If the open project was just archived, land on the next visible one.
+  const nextVisibleRoot = recentProjects[0]?.root ?? null;
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (!archiveSet.has(selectedProject.key)) return;
+    setSelectedCwd(nextVisibleRoot);
+  }, [archiveSet, nextVisibleRoot, selectedProject]);
   const showProjectFilter = recentProjects.length > 8;
   const visibleProjects = projectFilter.trim()
     ? recentProjects.filter((project) => project.root.toLowerCase().includes(projectFilter.trim().toLowerCase()))
     : recentProjects;
-
-  // Sessions of every worktree in the selected project are shown together
-  const selectedProject = projectFor(selectedCwd);
 
   // Per-project activity counts (running / unread) for the workspace selector.
   // Uses the same stable server key as the project list and filtering.
@@ -975,9 +1004,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // the dropdown.
   const hasOtherWorkspaceActivity = useMemo(
     () => [...projectActivity.entries()].some(
-      ([key, { running, unread }]) => key !== selectedProject?.key && (running > 0 || unread > 0),
+      ([key, { running, unread }]) => (
+        key !== selectedProject?.key
+        && !archiveSet.has(key)
+        && (running > 0 || unread > 0)
+      ),
     ),
-    [projectActivity, selectedProject],
+    [archiveSet, projectActivity, selectedProject],
   );
 
   const filteredSessions = selectedProject
@@ -1047,7 +1080,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <PiWebTitle />
           <div style={{ display: "flex", gap: 6 }}>
             <button
-              onClick={handleNewSession}
+              onClick={startNewSession}
               disabled={!selectedCwd}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
@@ -1254,6 +1287,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                       id={project.key}
                       pinned={pinSets.projects.has(project.key)}
                       onToggle={togglePin}
+                    />
+                    {/* [archive-fork] Row itself is a <button>, so render a span. */}
+                    <ArchiveButton
+                      as="span"
+                      id={project.key}
+                      archived={false}
+                      onToggle={toggleArchive}
                     />
                   </button>
                 ))}

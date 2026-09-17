@@ -94,8 +94,8 @@ jobs:
           npm run lint
           npx tsc --noEmit
           npm test
-        # npm test 会跑 lib/pin-fork-anchors.test.mjs：上游若重构掉 pin 的接缝，
-        # 这里会红，从而不会发出一个"pin 已静默失效"的版本。
+        # npm test 会跑 pin / archive 的锚点测试：上游若重构掉接缝，
+        # 这里会红，从而不会发出一个功能已静默失效的版本。
 
       - name: 计算版本号
         id: version
