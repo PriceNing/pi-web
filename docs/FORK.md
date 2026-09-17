@@ -73,21 +73,69 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 
 ---
 
-## 3. 补丁纪律（加新功能时必须遵守）
+## 3. 补丁纪律（加新功能时必须遵守 —— 本节是唯一权威出处）
 
-上游非常活跃（近 90 天 **568 次提交**，约 6 次/天），所以"改动放哪里"直接决定以后同步是 5 分钟还是 5 小时。
+上游非常活跃（近 90 天 **568 次提交**，约 6 次/天），所以**"改动放哪里"直接决定以后同步是
+5 分钟还是 5 小时**。这一节是硬约束，不是建议。
 
-1. **新逻辑一律开新文件**，绝不往大组件里塞。
-2. **优先改冷文件**。近 90 天提交次数（越少越安全）：
-   `ChatWindow.tsx` 86、`AppShell.tsx` 74、`lib/rpc-manager.ts` 72、`useAgentSession.ts` 67、`lib/i18n/messages/zh-CN.ts` 58、`SessionSidebar.tsx` 48、`lib/session-reader.ts` 31、`lib/types.ts` 20 …
-   而 `lib/session-family.ts`、`lib/project-groups.ts`、`lib/app-update.ts` 只有 1 次。
-3. **不要往 `lib/i18n/messages/*.ts` 加 key**（最热的文件之一，且有 key 集对齐测试）。新功能文案自带在组件里，用 `useI18n()` 的 `locale` 选。
-4. **不要往 `lib/types.ts` 加字段**。需要给 `SessionInfo` 附加信息时，在 API 层做结构类型转换或另建类型。
-5. **热文件里只允许"接线"级改动**，每处加 `// [pin-fork]`（或对应功能的 `[xxx-fork]`）标记。
-6. **每个补丁集都要有锚点测试**。参考 `lib/pin-fork-anchors.test.mjs`：断言接缝仍然存在。这是防"**上游重构后功能静默失效、但测试全绿**"的唯一有效手段。
-7. 上游文件的行为被我们改到时，**同步更新上游自带的那条断言**（我们已经改过 2 处），别留着红。
+### 3.1 流程：一个功能 = 一个分支 = 一个 commit
 
----
+```bash
+git checkout -b feat/<名字>          # 不要混进 feat/pin-project-and-session
+# ...写代码...
+npm run lint && npx tsc --noEmit && npm test     # 不要在本地 npm run build（Windows 会 OOM，见 §5.1）
+git push -u origin feat/<名字>       # 开 PR，让 CI 在 ubuntu 上跑一遍（白捡 Linux 覆盖）
+```
+
+合并进 main 后 CI 自动发版；**先升一台 canary，再改其余机器的 `PI_WEB_PIN`**。
+保持"单功能单 commit"是为了能单独 revert —— 上游哪天自己实现了同一件事，你要能干净地摘掉自己那一个。
+
+### 3.2 代码放哪里（按优先级，从上往下依次退化）
+
+| 顺序 | 做法 | 理由 |
+|---|---|---|
+| 1 | 新逻辑一律开**新文件**，绝不往大组件里塞 | 永不冲突 |
+| 2 | 需要服务端状态 → 写 `~/.pi/agent/pi-web/<名字>.json`，照抄 `lib/pin-store.ts`（`proper-lockfile` 加锁 + 原子写 + 指纹缓存） | 与 pi 共享目录同生命周期，备份/迁移一起走 |
+| 3 | 需要改行为 → 挂在**冷文件**的接缝上。近 90 天提交次数：`lib/session-family.ts` 1、`lib/project-groups.ts` 1、`lib/app-update.ts` 1、`app/api/agent/running/route.ts` 3、`app/api/sessions/route.ts` 5 | 冲突概率极低 |
+| 4 | 实在要动**热文件** → 只允许"接线"级改动，每处加 `// [<功能>-fork]` 标记 | 把冲突面压到几十行内 |
+| 5 | **绝不触碰**（见下表） | — |
+
+热文件黑名单（近 90 天被改次数）：
+
+```
+ChatWindow.tsx 86   AppShell.tsx 74   lib/rpc-manager.ts 72   useAgentSession.ts 67
+lib/i18n/messages/zh-CN.ts 58   SessionSidebar.tsx 48   lib/session-reader.ts 31   lib/types.ts 20
+```
+
+**绝对禁止清单**：
+
+| 禁止 | 原因 |
+|---|---|
+| 往 `lib/i18n/messages/*.ts` 加 key | 最热文件之一（61 次/90天）且有 key 集对齐测试，每次同步必冲突。文案自带在组件里，用 `useI18n()` 的 `locale` 选 |
+| 往 `lib/types.ts` 加字段 | 20 次/90天。要附加信息就在 API 层做结构类型转换或另建类型 |
+| 写 `settings.json` / `auth.json` / `models.json` | 归 pi CLI 所有，两边写会互相覆盖 |
+| 改 `sessions/` 下任何内容 | 破坏"与本地 pi 共享"的设计（§8） |
+| 伪造 `modified` 等真实字段来骗排序 | 污染 pi 的真实数据。要置顶就改比较器（见 pin 的做法） |
+
+### 3.3 每个新功能必须配套的四件事
+
+1. 纯逻辑抽成**无依赖模块**，必须能被浏览器 bundle import（不得出现 `node:fs`、`node:path`、`next/server`）
+2. 单元测试 + **一个锚点测试**（照 `lib/pin-fork-anchors.test.mjs` 写）：断言你挂的接缝仍然存在。
+   这是防"**上游重构后功能静默失效、但测试全绿**"的唯一有效手段 —— 它宁可挡住发版，也不发一个坏包。
+3. 更新本文档：§2 改动清单、§10 已知取舍
+4. 若引入新的服务端状态文件，在 §8 的边界表里登记路径与理由
+
+上游文件里被我们改到的既有断言，**同步改掉**（我们已经改过 2 处），不要留着红。
+
+### 3.4 什么时候该拒绝一个需求
+
+如果它要求重写热文件的大块逻辑（例如给虚拟化列表加分区标题 —— 行高写死 54px，插入 section 要改高度与窗口计算），
+**先估冲突成本再动手**。我们已经因此放弃过一次（见 §10），那是合理取舍，不是失败。
+
+### 3.5 心态：不再依赖上游接受任何东西
+
+历史上 pin/收藏类 5 个社区 PR 全部被关闭未合并，所以我们不指望 `agegr` 收我们的 PR。
+**fork 就是终点**，功能对不对由我们自己的 CI 门禁和生产机说了算。
 
 ## 4. 版本号与 tag 规则
 
@@ -456,35 +504,15 @@ npm i -g @pricening/pi-web@0.9.6 --registry=https://registry.npmjs.org/   # 回�
 
 ### 12.2 我自己又有了新需求，怎么做？
 
-**流程**（一个功能 = 一个分支 = 一个 commit）：
+**规则全部在 §3（唯一权威出处）**，那里有：流程、代码放置优先级、热文件黑名单、绝对禁止清单、
+必须配套的四件事、以及"什么时候该拒绝一个需求"。
+
+最短起手式：
 
 ```bash
-git checkout -b feat/<名字>        # 不要混进 feat/pin-project-and-session
-# ...写代码...
-npm run lint && npx tsc --noEmit && npm test     # 不要在本地 npm run build（Windows 会 OOM，见 §5.1）
-git push -u origin feat/<名字>      # 开 PR，让 CI 在 ubuntu 上跑一遍（白捡 Linux 覆盖）
+git checkout -b feat/<名字>
+npm run lint && npx tsc --noEmit && npm test     # 别在本地 build
+git push -u origin feat/<名字>                   # 开 PR 拿 Linux 覆盖
 ```
-合并进 main 后 CI 会自动发版；先升一台 canary，再改其余机器的 `PI_WEB_PIN`。
 
-**代码放哪里**（§3 的可执行版，按优先级）：
-
-| 顺序 | 做法 | 理由 |
-|---|---|---|
-| 1 | 新逻辑开**新文件** | 永不冲突 |
-| 2 | 需要服务端状态 → 写 `~/.pi/agent/pi-web/<名字>.json`，抄 `lib/pin-store.ts`（锁 + 原子写 + 指纹缓存） | 与 pi 共享目录同生命周期，备份/迁移一起走 |
-| 3 | 需要改行为 → 找**冷文件**做接缝（`lib/session-family.ts`、`lib/project-groups.ts`、`lib/app-update.ts` 等，90 天 1 次提交） | 冲突概率极低 |
-| 4 | 实在要动热文件（`SessionSidebar.tsx` 48 次/90天、`AppShell.tsx` 74 次、`ChatWindow.tsx` 86 次）→ 只留"接线"，每处加 `// [<功能>-fork]` 标记 | 把冲突面压到几十行内 |
-| 5 | **绝不**：往 `lib/i18n/messages/*.ts` 加 key、往 `lib/types.ts` 加字段、写 `settings.json`/`auth.json`、改 `sessions/` 内容、伪造 `modified` | 前两个是最热文件会天天冲突；后三个破坏"与本地 pi 共享"的设计（§8） |
-
-**每个新功能必须配套的四件事**：
-
-1. 纯逻辑抽成无依赖模块（能被浏览器 bundle import：不出现 `node:fs`/`next/server`）
-2. 单元测试 + **一个锚点测试**（照 `lib/pin-fork-anchors.test.mjs` 写，断言接缝还在）
-3. 更新 `docs/FORK.md`：§2 改动清单、§10 已知取舍
-4. 若引入新的服务端状态文件，在 §8 的边界表里登记它的路径与理由
-
-**判断"这个需求值不值得做"**：如果它要求重写热文件的大块逻辑（例如给虚拟化列表加分区标题），
-先估冲突成本。我们已经因此放弃过一次（见 §10），这是合理的取舍，不是失败。
-
-**不再依赖上游**：我们不再指望 agegr 接受任何 PR（历史上 pin/收藏类 5 个社区 PR 全部被关闭未合并）。
-fork 就是终点，功能对不对由我们自己的 CI 门禁和生产机说了算。
+然后按 §3.3 补齐四件套，合并后 CI 自动发版，先升 canary 再推 `PI_WEB_PIN`。
