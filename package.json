@@ -1,6 +1,6 @@
 {
   "name": "@pricening/pi-web",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "description": "Web UI for the pi coding agent (fork of @agegr/pi-web with server-side pinned and archived projects)",
   "homepage": "https://github.com/PriceNing/pi-web#readme",
   "repository": {
@@ -17,7 +17,7 @@
   "forkedFrom": {
     "name": "@agegr/pi-web",
     "version": "0.9.1",
-    "commit": "1eb5e66a37c468aca7f0d338edb23de4fd84433e",
+    "commit": "0611857dbd9479d2ae05b89da4e81dc237e7c164",
     "url": "https://github.com/agegr/pi-web"
   },
   "license": "MIT",
