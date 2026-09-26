@@ -420,6 +420,26 @@ schtasks /Run /TN pi-web-server
 | 只读镜像 | `npm login` / `npm publish` 打到镜像报 409 `user registration disabled`；新 scoped 包安装 404 | `~/.npmrc` 的 `registry` 是全局的，launcher 与文档里的每条 npm 命令都显式带 `--registry` |
 | 防火墙 | 30141 入站从别的机器不通 | 远程验证要在目标机本机做（`Invoke-WebRequest http://127.0.0.1:30141/...`） |
 | 本地构建 | `npm run build` 在 Windows 上 OOM（见 §5.1） | 构建/发布只在 CI；本机只跑 dev 预览和 `npm test` |
+| CRLF 签出 | `npm test` 凭空多出 9 个失败，而 Linux CI 全绿 | 上游有一批测试用**字面量 grep 源码**（如 `AppShell.file-viewer-state.test.mjs` 在 `AppShell.tsx` 里找 `"</div>\n      </div>\n    </div>"`）。用户级 `core.autocrlf=true` 会把签出变成 CRLF，正则自然失配。仓库内 blob 一直是 LF，所以**不是回归**。修法见下 |
+| `node-pty` 的 pid | `terminal-manager.test.mjs` 里 `assert.ok(record.pty.pid > 0)` 恒失败 | Windows ConPTY 上报 **pid = 0**（实测），PTY 本身能起、能 kill。这条断言只对 Linux/macOS 成立 |
+| 终端租约宽限期 | 同文件 `unclaimed creations expire...` 在 Windows 上跑不过 | 见下方「Windows 上可接受的 2 个测试失败」 |
+
+**换行符已经钉死在仓库里**：`.gitattributes` 写的是 `* text=auto eol=lf`，后面再单独把 `*.bat` / `*.cmd` 钉成 `eol=crlf`（`cmd.exe` 需要）。属性优先级高于 `core.autocrlf`，所以**新克隆不需要任何本机配置**就能跑绿；实测在 `core.autocrlf=true` 下重签出，源码仍是 LF、`.bat` 仍是 CRLF。
+
+改完属性后要强制全量重签出才会生效（`git status` 会先显示一堆「已修改」，那是换行符差异，不是内容差异）：
+
+```bash
+git rm --cached -rq . && git reset --hard
+```
+
+**Windows 上可接受的 2 个测试失败**（不是我们弄坏了什么，别去改上游测试文件凑绿）：
+
+| 测试 | 为什么输 | 为什么不是缺陷 |
+|---|---|---|
+| `native PTY starts after install...` | ConPTY 报 pid=0，断言 `pid > 0` 不成立 | 实测 `createTerminal()` 能拿到记录、`killTerminal()` 能回收，终端功能正常 |
+| `unclaimed creations expire...` | 该测试只 tick **一个** `TERMINAL_RECONNECT_MS`。Windows 下 cmd.exe 立刻退出，`onExit` 会重新武装一个全长的 cleanup timer，所以未被认领的终端需要**两个**宽限期才回收 | 实测 tick 3x 后 `hasTerminal()` 确实变 `false`，注册表清空——**有界回收，不是泄漏**；Linux 下 `/bin/sh -l` 不退出，一个周期就够 |
+
+另有 2 个失败（`models-cache` 的 image warnings、`node-cli` 的 PATH key）**单独跑全绿**，是全量并发下的共享状态干扰，不是平台问题。
 
 ### 7.4 切换后的自检
 
@@ -551,6 +571,10 @@ npm run lint
 npx tsc --noEmit
 npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 与 lib/archive-fork-anchors.test.mjs 全绿
 ```
+
+Windows 本机跑 `npm test` 预期是 **2 个失败**（均来自 `lib/terminal-manager.test.mjs`，原因见 §7.3）。
+判定标准不是“0 失败”，而是：**失败集不超出那 2 个，且 pin/archive 锚点与接缝测试全绿**。一旦出现第三个
+失败，先查换行符（`grep -c $'\r' components/AppShell.tsx`）再查代码。Linux CI 必须是 0 失败。
 
 **不要在本地跑 `npm run build`**（见 §5.1 的 OOM 实测）；构建属于 CI。
 
