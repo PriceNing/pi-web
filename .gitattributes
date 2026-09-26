@@ -1,3 +1,12 @@
-# Windows 批处理必须带 CRLF 才能可靠地被 cmd.exe 解析；仓库内存 LF，签出时转 CRLF。
+# 仓库内一律存 LF；签出时也保持 LF。
+#
+# 这不是审美问题，而是可执行性问题：上游有一批测试直接用字面量 grep 源码
+# （例如 components/AppShell.file-viewer-state.test.mjs 在 AppShell.tsx 里找
+# "</div>\n      </div>\n    </div>"）。Windows 上若用户级 core.autocrlf=true，
+# 签出会变成 CRLF，这些正则全部失配，`npm test` 凭空多出 9 个假失败。
+# 属性优先于 core.autocrlf，所以写在这里才能让任何 Windows 克隆都直接跑绿。
+* text=auto eol=lf
+
+# 批处理必须带 CRLF 才能被 cmd.exe 可靠解析；后面的规则覆盖上面的通配。
 *.bat text eol=crlf
 *.cmd text eol=crlf
