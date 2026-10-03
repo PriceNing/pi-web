@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import {
   invalidateSessionListCache,
+  invalidateSessionManagerCache,
   invalidateSessionPathCache,
   listAllSessions,
   mergeSessionLists,
@@ -168,6 +169,9 @@ export async function deleteSessionById(id: string): Promise<{ deletedSessionIds
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     invalidateSessionPathCache(deletedId);
+    // Upstream addition (kept in sync with app/api/sessions/[id]/route.ts): the
+    // manager cache is keyed by path, so a removed file must be dropped too.
+    invalidateSessionManagerCache(deletedPath);
   }
   invalidateSessionListCache();
   return { deletedSessionIds: [...deletedSessionIds] };

@@ -125,9 +125,13 @@ test("offers the downstream context-menu hook only on a normal session row", () 
 });
 
 test("lifecycle refreshes bypass the cache while cross-window polling reuses it", () => {
-  assert.match(source, /force \? "\/api\/sessions\?force=1" : "\/api\/sessions"/);
+  assert.match(source, /function sessionListUrl\(summary: boolean, force: boolean\)/);
+  assert.match(source, /if \(summary\) return "\/api\/sessions\?summary=1"/);
+  assert.match(source, /if \(force\) return "\/api\/sessions\?force=1"/);
   assert.match(source, /cache: "no-store"/);
-  assert.match(source, /loadSessions\(isFirst, !isFirst\)/);
+  // First paint uses the cheap summary listing, then hydrates after a delay.
+  assert.match(source, /loadSessions\(true, false, true\)/);
+  assert.match(source, /setTimeout\(\(\) => \{[\s\S]*?void loadSessions\(false, true\)/);
   assert.match(source, /data\.sessionListVersion !== sessionListVersionRef\.current[\s\S]*?await loadSessions\(\)/);
   assert.doesNotMatch(source, /sessionRefreshDone|sessionRefreshTimerRef|title=\{t\("sidebar\.refresh"\)\}/);
   assert.match(source, /loadSessions\(false, true\);[\s\S]*?onBackgroundTaskDone/);
@@ -140,7 +144,11 @@ test("does not expose disk-backed actions for transient sessions", () => {
 
 test("hides subagent rows and aggregates their state into the main session row", () => {
   // [pin-fork] The list also receives the server pin set so pinned rows come first.
-  assert.match(source, /const sessionFamilies = listSessionFamilies\(filteredSessions,\s*pinSets\.sessions\)/);
+  // Upstream wrapped the call in useMemo, so the assertion follows that shape.
+  assert.match(
+    source,
+    /const sessionFamilies = useMemo\(\s*\(\) => listSessionFamilies\(filteredSessions,\s*pinSets\.sessions\)/,
+  );
   assert.match(source, /familySessions\.some\(\(session\) => session\.id === selectedSessionId\)/);
   assert.match(source, /familySessions\.some\(\(session\) => runningSessionIds\.has\(session\.id\)\)/);
   assert.doesNotMatch(source, /function SessionTreeItem/);

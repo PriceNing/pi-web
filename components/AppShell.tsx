@@ -10,7 +10,7 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
-import { ProjectTrustDialog } from "./ProjectTrustDialog";
+import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
@@ -35,6 +35,7 @@ import {
 import { setupPushSubscription } from "@/lib/push-client";
 import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
+import { mergeCatalogRow } from "./session-catalog-helpers";
 import { rekeyDraft } from "@/lib/draft-store";
 import {
   clearLastOpen,
@@ -54,13 +55,13 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
-import type { ProjectTrustStatus } from "@/lib/api-types";
+import type { McpErrorResponse, ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { getSessionFamily } from "@/lib/session-family";
-import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 type AutoNameStatus =
@@ -123,6 +124,14 @@ export function AppShell() {
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
     setSessionCatalog(sessions);
+    // The sidebar hydrates metadata after the selected session has already
+    // mounted. Merge that update into the active session without changing the
+    // ChatWindow key or restarting its history load.
+    setSelectedSession((current) => {
+      if (!current) return current;
+      const refreshed = sessions.find((session) => session.id === current.id);
+      return refreshed ? mergeCatalogRow(current, refreshed) : current;
+    });
   }, []);
   const sessionsWithSelection = useMemo(() => {
     if (!selectedSession) return sessionCatalog;
@@ -167,7 +176,7 @@ export function AppShell() {
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
-  const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
+  const [projectTrustError, setProjectTrustError] = useState<ProjectTrustFailure | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelExpanded, setRightPanelExpanded] = useState(false);
@@ -250,12 +259,14 @@ export function AppShell() {
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
+  const [branchSwitchLocked, setBranchSwitchLocked] = useState(false);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
   const sessionHasBranches = hasSessionBranches(branchTree);
 
-  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
+  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => {
     setBranchTree(tree);
     setBranchActiveLeafId(activeLeafId);
+    setBranchSwitchLocked(locked);
     branchLeafChangeFnRef.current = onLeafChange;
   }, []);
 
@@ -372,6 +383,11 @@ export function AppShell() {
     setMobileToolbarMoreOpen(false);
     setActiveTopPanel("session");
   }, [isMobile]);
+
+  // The composer opens Settings too: a bare /mcp opens Settings › MCP (useAgentSession).
+  const openSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsSection(section);
+  }, []);
 
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) {
@@ -602,44 +618,51 @@ export function AppShell() {
     const token = ++workspaceRestoreTokenRef.current;
     const lastOpenSessionId = getLastOpenSession(projectKey);
     if (!lastOpenSessionId) return;
+    const adopt = (d: { sessions: SessionInfo[] } | null) => {
+      if (token !== workspaceRestoreTokenRef.current) return; // stale switch
+      const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
+      if (!s) {
+        // The list loaded but the remembered session is gone — forget it.
+        // When the list itself failed (d === null) keep the memory so a
+        // later switch retries the restore.
+        if (d) clearLastOpen(projectKey);
+        return;
+      }
+      if (workspaceKeyOf(s) !== projectKey) {
+        // Defensive: the remembered session drifted out of this workspace.
+        clearLastOpen(projectKey);
+        return;
+      }
+      // Keep the temporary composer's draft in its cwd, even when the
+      // remembered session belongs to another worktree of this project.
+      const activeDraftKey = activeNewSessionDraftKeyRef.current;
+      if (activeDraftKey) {
+        rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(cwd));
+      }
+      activeNewSessionDraftKeyRef.current = null;
+      // Selecting the session must remount the chat with the session
+      // present: useAgentSession loads content in a mount-only effect, so
+      // the null-session welcome mount from the switch would never load
+      // the restored session's messages.
+      setSelectedSession(s);
+      setSessionKey((k) => k + 1);
+      if (new URLSearchParams(window.location.search).get("session") !== s.id) {
+        router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
+      }
+    };
+    // Fast path: the sidebar already delivered the catalogue — restore
+    // without waiting on a fresh /api/sessions round trip.
+    if (sessionCatalog.length > 0) {
+      adopt({ sessions: sessionCatalog });
+      return;
+    }
     void fetch("/api/sessions")
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
-      .then((d) => {
-        if (token !== workspaceRestoreTokenRef.current) return; // stale switch
-        const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
-        if (!s) {
-          // The list loaded but the remembered session is gone — forget it.
-          // When the list itself failed (d === null) keep the memory so a
-          // later switch retries the restore.
-          if (d) clearLastOpen(projectKey);
-          return;
-        }
-        if (workspaceKeyOf(s) !== projectKey) {
-          // Defensive: the remembered session drifted out of this workspace.
-          clearLastOpen(projectKey);
-          return;
-        }
-        // Keep the temporary composer's draft in its cwd, even when the
-        // remembered session belongs to another worktree of this project.
-        const activeDraftKey = activeNewSessionDraftKeyRef.current;
-        if (activeDraftKey) {
-          rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(cwd));
-        }
-        activeNewSessionDraftKeyRef.current = null;
-        // Selecting the session must remount the chat with the session
-        // present: useAgentSession loads content in a mount-only effect, so
-        // the null-session welcome mount from the switch would never load
-        // the restored session's messages.
-        setSelectedSession(s);
-        setSessionKey((k) => k + 1);
-        if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-          router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
-        }
-      })
+      .then(adopt)
       .catch(() => {
         // Network hiccup: keep the remembered session for a later retry.
       });
-  }, [router]);
+  }, [router, sessionCatalog]);
 
   const handleCwdChange = useCallback((
     cwd: string | null,
@@ -695,6 +718,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
@@ -751,6 +775,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     branchLeafChangeFnRef.current = null;
     setSystemPrompt(null);
     setSystemTools(null);
@@ -783,6 +808,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
@@ -817,6 +843,13 @@ export function AppShell() {
   }, []);
 
   const handleOpenSession = useCallback(async (sessionId: string) => {
+    // Prefer the catalogue the sidebar already delivered: selecting from it
+    // avoids a full detail round trip just to obtain the SessionInfo.
+    const catalogued = sessionCatalog.find((s) => s.id === sessionId);
+    if (catalogued && !catalogued.transient) {
+      handleSelectSession(catalogued);
+      return;
+    }
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
       const data = await response.json() as { info?: SessionInfo; error?: string };
@@ -825,7 +858,7 @@ export function AppShell() {
     } catch (error) {
       console.error("[pi-web] failed to open session:", error instanceof Error ? error.message : error);
     }
-  }, [handleSelectSession]);
+  }, [handleSelectSession, sessionCatalog]);
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
@@ -999,6 +1032,7 @@ export function AppShell() {
       setSessionKey((k) => k + 1);
       setBranchTree([]);
       setBranchActiveLeafId(null);
+      setBranchSwitchLocked(false);
       setSystemPrompt(null);
       setSystemTools(null);
       setSystemInfoLoading(false);
@@ -1097,6 +1131,8 @@ export function AppShell() {
     if (!projectTrustCwd) return;
 
     const controller = new AbortController();
+    // The answer also lists the project's MCP servers (`mcpFile`, `mcpServers`), unused here: the
+    // trust dialog fetches the listing again when it opens, since the file can change in between.
     fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
       signal: controller.signal,
     })
@@ -1122,18 +1158,35 @@ export function AppShell() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectTrustCwd }),
       });
-      const data = await response.json() as ProjectTrustStatus & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const data = await response.json() as ProjectTrustStatus & Partial<McpErrorResponse>;
+      if (!response.ok || data.error) {
+        // The dialog translates the reason; the English error is only its diagnostic.
+        setProjectTrustError({ error: data.error ?? `HTTP ${response.status}`, ...(data.reason ? { reason: data.reason } : {}) });
+        return;
+      }
       setProjectTrust(data);
       setProjectTrustDialogOpen(false);
       setModelsRefreshKey((key) => key + 1);
       setSessionKey((key) => key + 1);
     } catch (error) {
-      setProjectTrustError(error instanceof Error ? error.message : String(error));
+      setProjectTrustError({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       setProjectTrustBusy(false);
     }
   }, [projectTrustBusy, projectTrustCwd]);
+
+  // The restricted-mode banner and Settings › MCP's trust notice open the same dialog.
+  const openProjectTrustDialog = useCallback(() => {
+    setProjectTrustError(null);
+    setProjectTrustDialogOpen(true);
+  }, []);
+
+  // Settings › MCP added a project server: `.pi/mcp.json` alone makes a folder require trust, and a
+  // fresh folder was trusted in the same step. Every mounted section reloads in place on the new
+  // status (projectTrustReloadKey); nothing was rebuilt, so the chat needs no new session key.
+  const handleProjectTrustChanged = useCallback((cwd: string, status: ProjectTrustStatus) => {
+    if (cwd === projectTrustCwd) setProjectTrust(status);
+  }, [projectTrustCwd]);
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
@@ -1178,7 +1231,7 @@ export function AppShell() {
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
         ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
+          const disabled = settingsSectionRequiresProject(section) && !projectTrustCwd;
           return (
             <button
               key={section}
@@ -1228,10 +1281,7 @@ export function AppShell() {
     return (
       <button
         type="button"
-        onClick={() => {
-          setProjectTrustError(null);
-          setProjectTrustDialogOpen(true);
-        }}
+        onClick={openProjectTrustDialog}
         title={translate("trust.resourcesNotLoaded")}
         aria-label={translate("trust.resourcesNotLoaded")}
         style={{
@@ -1490,6 +1540,7 @@ export function AppShell() {
             tree={branchTree}
             activeLeafId={branchActiveLeafId}
             onLeafChange={handleBranchLeafChange}
+            locked={branchSwitchLocked}
             inline
             containerRef={topBarRef}
             open={activeTopPanel === "branches"}
@@ -2025,6 +2076,7 @@ export function AppShell() {
               tree={branchTree}
               activeLeafId={branchActiveLeafId}
               onLeafChange={handleBranchLeafChange}
+              locked={branchSwitchLocked}
               inline
               compact
               containerRef={topBarRef}
@@ -2306,6 +2358,7 @@ export function AppShell() {
               onSystemInfoLoaderChange={handleSystemInfoLoaderChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
+              onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
               onOpenSession={handleOpenSession}
@@ -2503,8 +2556,12 @@ export function AppShell() {
           setModelsRefreshKey((key) => key + 1);
         }}
         onSessionReloaded={() => setSessionKey((key) => key + 1)}
+        projectTrust={projectTrust}
+        onOpenTrustDialog={openProjectTrustDialog}
+        onProjectTrustChanged={handleProjectTrustChanged}
       />
     )}
+    {/* After Settings, so it opens above it (z-index 1100 over 1000) when Settings › MCP asks for it. */}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}
@@ -2514,6 +2571,7 @@ export function AppShell() {
           if (!projectTrustBusy) setProjectTrustDialogOpen(false);
         }}
         onConfirm={() => void handleTrustProject()}
+        onStatus={setProjectTrust}
       />
     )}
     </>

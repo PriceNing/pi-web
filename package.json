@@ -1,6 +1,6 @@
 {
   "name": "@pricening/pi-web",
-  "version": "0.9.11",
+  "version": "0.10.0",
   "description": "Web UI for the pi coding agent (fork of @agegr/pi-web with server-side pinned and archived projects)",
   "homepage": "https://github.com/PriceNing/pi-web#readme",
   "repository": {
@@ -16,14 +16,21 @@
   },
   "forkedFrom": {
     "name": "@agegr/pi-web",
-    "version": "0.9.1",
-    "commit": "0611857dbd9479d2ae05b89da4e81dc237e7c164",
+    "version": "0.10.0",
+    "commit": "6fcd7d44981ab51a21d6cd6eb06d361d0e3d3068",
     "url": "https://github.com/agegr/pi-web"
   },
   "license": "MIT",
   "engines": {
     "node": ">=22.19.0"
   },
+  "browserslist": [
+    "chrome 111",
+    "edge 111",
+    "firefox 111",
+    "safari 16.2",
+    "ios_saf 16.2"
+  ],
   "bin": {
     "pi-web": "bin/pi-web.js"
   },
@@ -53,27 +60,26 @@
     "release:pin:latest": "npm run build && npm publish"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.85.1",
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-tui": "0.85.1",
+    "@earendil-works/pi-agent-core": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
-    "ansi_up": "^6.0.6",
     "js-yaml": "^5.2.3",
-    "next": "16.3.5",
+    "next": "16.3.6",
     "node-pty": "1.2.0-beta.15",
     "proper-lockfile": "4.1.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "remark-frontmatter": "^5.0.0",
-    "semver": "7.8.0",
-    "undici": "8.10.0",
+    "semver": "7.8.5",
+    "undici": "8.11.0",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
     "@types/js-yaml": "^4.0.9",
+    "@types/mdast": "^4.0.4",
     "@types/node": "^25",
     "@types/proper-lockfile": "4.1.4",
     "@types/react": "^19",
@@ -81,8 +87,9 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/semver": "7.8.0",
     "@types/web-push": "^3.6.4",
+    "ansi_up": "^6.0.6",
     "eslint": "^9",
-    "eslint-config-next": "16.3.5",
+    "eslint-config-next": "16.3.6",
     "jiti": "^2.7.0",
     "katex": "^0.16.47",
     "mammoth": "^1.12.0",
@@ -94,6 +101,7 @@
     "rehype-katex": "^7.0.1",
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
+    "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "tailwindcss": "^4.2.2",
