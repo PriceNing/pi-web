@@ -59,7 +59,15 @@ jobs:
       - name: 拉取上游
         run: |
           git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
-          git fetch upstream --tags --prune
+          # 只取 main，**不取上游 tag**（实测教训，2026-10-02）：
+          # 上游自己也打了 v0.9.2 / v0.9.3，和我们的发版 tag 同名但指向不同 commit。
+          # `git fetch --tags` 遇到同名 tag 会报 `! [rejected] ... (would clobber existing tag)`
+          # 并以退出码 1 结束，在 `bash -e` 下直接把 job 死在“拉取上游”这一步——
+          # 于是定时同步连续 8 天全部 failure，一次 merge 都没跑过。
+          # 本 workflow 从不使用上游 tag（上游基线记录在 package.json 的 forkedFrom.commit，
+          # 版本号来自 npm + package.json，发版 tag 由下面自己 push），所以干脆不导入。
+          # 写死 refspec + --no-tags 是为了连“tag 自动跟随”也关掉，避免上游再打同名 tag。
+          git fetch --no-tags --prune upstream "+refs/heads/main:refs/remotes/upstream/main"
 
       - name: 合并上游（冲突即停，不发布）
         id: merge
