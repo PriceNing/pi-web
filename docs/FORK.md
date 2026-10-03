@@ -319,12 +319,27 @@ npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 ### 6.2 CI 报冲突时（本地手工）
 
 ```bash
-git fetch upstream --tags
+# 不要带 --tags：上游与我们有同名 tag（实测 v0.9.2 / v0.9.3 同名不同 commit），
+# 它会让 fetch 以退出码 1 结束，详见 §5.2。
+git fetch --no-tags --prune upstream "+refs/heads/main:refs/remotes/upstream/main"
 git merge upstream/main
 # 解决冲突：优先保留上游实现，再把 [xxx-fork] 接线重新插回去
-npm run lint && npx tsc --noEmit && npm test
+npm install            # 上游可能加依赖；lock 自动合并不代位可靠
+npm run lint && npx tsc --noEmit
+node scripts/set-forked-from.mjs \
+  --version "$(git show upstream/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")" \
+  --commit "$(git rev-parse upstream/main)"
 git push origin main
+# 然后手动触发一次；必须带 force_publish=true——本地已把上游合完，
+# CI 看到 incoming=0 会直接跳过发版。
+gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_publish=true
 ```
+
+发版后 npm 有几分钟的**发布后处理**延迟（provenance + 6.8MB tarball），日志会写
+`Your package is being processed and may take a few minutes to become available.`。
+此时 `npm view` 和 dist-tags 还是旧版，**不是发布失败**；以日志里的
+`+ @pricening/pi-web@<version>` 和 `✅ OIDC 发布成功` 为准，再轮询
+`https://registry.npmjs.org/-/package/@pricening/pi-web/dist-tags`。
 
 冲突处理提示：
 
@@ -422,7 +437,7 @@ schtasks /Run /TN pi-web-server
 | 本地构建 | `npm run build` 在 Windows 上 OOM（见 §5.1） | 构建/发布只在 CI；本机只跑 dev 预览和 `npm test` |
 | CRLF 签出 | `npm test` 凭空多出 9 个失败，而 Linux CI 全绿 | 上游有一批测试用**字面量 grep 源码**（如 `AppShell.file-viewer-state.test.mjs` 在 `AppShell.tsx` 里找 `"</div>\n      </div>\n    </div>"`）。用户级 `core.autocrlf=true` 会把签出变成 CRLF，正则自然失配。仓库内 blob 一直是 LF，所以**不是回归**。修法见下 |
 | `node-pty` 的 pid | `terminal-manager.test.mjs` 里 `assert.ok(record.pty.pid > 0)` 恒失败 | Windows ConPTY 上报 **pid = 0**（实测），PTY 本身能起、能 kill。这条断言只对 Linux/macOS 成立 |
-| 终端租约宽限期 | 同文件 `unclaimed creations expire...` 在 Windows 上跑不过 | 见下方「Windows 上可接受的 2 个测试失败」 |
+| 终端租约宽限期 | 同文件 `unclaimed creations expire...` 在 Windows 上跑不过 | 见下方「Windows 专属测试失败」 |
 
 **换行符已经钉死在仓库里**：`.gitattributes` 写的是 `* text=auto eol=lf`，后面再单独把 `*.bat` / `*.cmd` 钉成 `eol=crlf`（`cmd.exe` 需要）。属性优先级高于 `core.autocrlf`，所以**新克隆不需要任何本机配置**就能跑绿；实测在 `core.autocrlf=true` 下重签出，源码仍是 LF、`.bat` 仍是 CRLF。
 
@@ -432,14 +447,26 @@ schtasks /Run /TN pi-web-server
 git rm --cached -rq . && git reset --hard
 ```
 
-**Windows 上可接受的 2 个测试失败**（不是我们弄坏了什么，别去改上游测试文件凑绿）：
+**Windows 专属测试失败**（不是我们弄坏了什么，别去改上游测试文件凑绿）。
+v0.10.0 同步后实测：本地 `npm test` = **2352 个测试 / 103 失败**（同步前是 1213 / 4）。
+**同样的 2352 个测试在 Linux CI 全绿**，所以下面每一类都已归因到 Windows 本身：
 
-| 测试 | 为什么输 | 为什么不是缺陷 |
+| 数量 | 类别 | 根因（均已实测） |
 |---|---|---|
-| `native PTY starts after install...` | ConPTY 报 pid=0，断言 `pid > 0` 不成立 | 实测 `createTerminal()` 能拿到记录、`killTerminal()` 能回收，终端功能正常 |
-| `unclaimed creations expire...` | 该测试只 tick **一个** `TERMINAL_RECONNECT_MS`。Windows 下 cmd.exe 立刻退出，`onExit` 会重新武装一个全长的 cleanup timer，所以未被认领的终端需要**两个**宽限期才回收 | 实测 tick 3x 后 `hasTerminal()` 确实变 `false`，注册表清空——**有界回收，不是泄漏**；Linux 下 `/bin/sh -l` 不退出，一个周期就够 |
+| **81** | `McpConfig` / `McpAddServer` / `ProjectTrustDialog` / `McpSignIn` 报 `useI18n must be used inside I18nProvider` | 上游测试用 `jiti.import("@/hooks/useI18n.tsx")` 拿 provider，而组件自己 `import { useI18n } from "@/hooks/useI18n"`。Windows 上 jiti 把两个写法解成**两个模块实例**→ 两个 React context→ provider 注不进去。已用探针直接证实：`I18nProvider === I18nProvider` 为 `false` |
+| 10 | `mcp-host.integration` 等报 `EBUSY: resource busy or locked, rmdir C:\...\pi-web-mcp-host-cwd-*` | Windows 文件锁：测试清理临时 cwd 时目录仍被占用（Linux 上可删） |
+| 2 | `terminal-manager` 的 pid / 宽限期 | ConPTY 上报 **pid = 0**，断言 `pid > 0` 天然不成立；cmd.exe 立即退出会使 `onExit` 重新武装一个全长 cleanup timer，所以未被认领的终端要**两个**宽限期才回收（实测 tick 3x 后 `hasTerminal()` 变 `false`，**有界回收、不是泄漏**） |
+| ~10 | `project-trust` / `codemode-settings` / `enabled-models-runtime` / `pi-sdk-internals` / `builtin-extensions.integration` | 符号链接与大小写不敏感文件系统语义差异（如“指向不存在目标的链接”，`existsSync` 在 Windows 上的结果不同） |
+| 2 | `models-cache` 的 image warnings、`node-cli` 的 PATH key | 全量并发下的共享状态干扰，**单独跑全绿** |
 
-另有 2 个失败（`models-cache` 的 image warnings、`node-cli` 的 PATH key）**单独跑全绿**，是全量并发下的共享状态干扰，不是平台问题。
+**关键陷阱：Windows 上 `npm test` 不会收尾。** 上游新测试留下未关闭的句柄，
+跑完全部也不打汇总行，进程挂住→ CI 之外的本地门禁拿不到结果。加 `--test-force-exit`：
+
+```bash
+node --experimental-strip-types --test-force-exit --test \
+  "app/**/*.test.mjs" "components/**/*.test.mjs" "hooks/**/*.test.mjs" \
+  "lib/**/*.test.mjs" "public/**/*.test.mjs" "scripts/**/*.test.mjs"
+```
 
 ### 7.4 切换后的自检
 
@@ -569,12 +596,20 @@ pin / archive 数据落在 `~/.pi/agent/pi-web/{pins,archives}.json`：备份/�
 ```bash
 npm run lint
 npx tsc --noEmit
-npm test          # 必须包含 lib/pin-fork-anchors.test.mjs 与 lib/archive-fork-anchors.test.mjs 全绿
+npm test          # Windows 上不会收尾，本地改用 §11 下面的 fork 测试清单
 ```
 
-Windows 本机跑 `npm test` 预期是 **2 个失败**（均来自 `lib/terminal-manager.test.mjs`，原因见 §7.3）。
-判定标准不是“0 失败”，而是：**失败集不超出那 2 个，且 pin/archive 锚点与接缝测试全绿**。一旦出现第三个
-失败，先查换行符（`grep -c $'\r' components/AppShell.tsx`）再查代码。Linux CI 必须是 0 失败。
+Windows 本机跑 `npm test` 已不再是“只差 2 个”：上游 v0.10.0 那批 MCP 测试在 Windows 下会多出
+**上百个失败**（全部原因见 §7.3，根子上是 jiti 把 `@/x.tsx` 和 `@/x` 解成两个模块实例）。
+所以本地门禁**不看全量失败数**，而是：
+
+1. `npx tsc --noEmit` 与 `npm run lint` **必须 0 输出**；
+2. **fork 测试必须全绿**：`node --test lib/pin-fork-anchors.test.mjs lib/pin-fork-seams.test.mjs
+   lib/archive-fork-anchors.test.mjs lib/archive-fork-seams.test.mjs lib/pin-store.test.mjs
+   lib/archive-store.test.mjs lib/settings-navigation.test.mjs components/SessionSidebar.test.mjs`；
+3. 全量测试只在 **CI（Linux）** 当门禁，那边必须 **0 失败**；
+4. 本地要跑全量就带 `--test-force-exit`（否则不收尾），且失败集只能落在 §7.3 那几类里；
+   出现新类别（尤其是锚点/接缝挂掉）才当回归处理，先查换行符：`grep -c $'\r' components/AppShell.tsx`。
 
 **不要在本地跑 `npm run build`**（见 §5.1 的 OOM 实测）；构建属于 CI。
 
