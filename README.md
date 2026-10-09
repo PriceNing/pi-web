@@ -23,8 +23,9 @@ How we stay in sync, version, and publish: **[docs/FORK.md](./docs/FORK.md)** (t
 
 ## Extra features (this fork)
 
-- **Server-side pins** for projects and sessions. Pins live under `~/.pi/agent/pi-web/pins.json`, so every browser hitting the same server (PC / phone / tablet) sees the same order. Pinned items sort first; within a group they stay ordered by recent activity.
-- **Project archive**. The sidebar “project” row is only a grouping of sessions, not a first-class pi object. Archive hides that group from the sidebar without moving session files. Manage / unarchive / bulk-delete those chats from **Settings → Archives**. Deleting sessions never deletes the code folder on disk.
+- **Pins and archive come from upstream now** (since v0.11.0): one server-side state file, `~/.pi/agent/pi-web-session-state.json`, holds pinned/archived session families, pinned projects, the manual project order, collapse states and an in-sidebar archive view, with a revision counter so every window against one server sees the same thing. We read and write through it.
+- **What this fork adds on top**: the global **Settings → Archives** page — it needs no open project — and per-project **bulk delete** of that project's sessions: a confirmation word is required (`confirm` / `确认` / `確認`), a running agent refuses with 409, subagents cascade, and the code folder on disk is never deleted. Ours also remain the pinned-first ordering (upstream orders groups only by activity and manual moves) and the one-shot importer for the retired stores, `lib/ui-state-migrate.ts`.
+- Semantic shifts we accepted when adopting upstream: archive entries are keyed by **session-family root**, so siblings collapse onto the earliest timestamp; a migrated project pin takes the migration-time stamp; migration invents no manual order. Details in [docs/FORK.md](./docs/FORK.md).
 
 Everything else is upstream Pi Web: same `~/.pi/agent` sharing with the local pi CLI, same session files, same models/auth/skills.
 
@@ -84,7 +85,7 @@ Password auth does not encrypt the connection. Do not put Pi Web on the public i
 ## Notes
 
 - **Agent data**: reads `~/.pi/agent` by default (session files under `sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`). Override with `PI_CODING_AGENT_DIR`.
-- **Shared with local pi**: models, settings, and credentials are pi’s files. This fork only writes extra state under `~/.pi/agent/pi-web/` (`pins.json`, `archives.json`). It does not rewrite `settings.json` / `auth.json` / session jsonl content.
+- **Shared with local pi**: models, settings, and credentials are pi’s files. This fork writes no extra state of its own any more — pins, archive and order live in upstream's `~/.pi/agent/pi-web-session-state.json`. The two legacy files this fork used to keep under `~/.pi/agent/pi-web/` are imported once, then renamed `*.migrated-<utc>` rather than deleted. It does not rewrite `settings.json` / `auth.json` / session jsonl content.
 - **File access** is limited to known project/session roots; it is not a general filesystem browser.
 - **Git worktrees**: [Worktrees in Pi Web](./docs/worktrees.md).
 

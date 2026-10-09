@@ -346,6 +346,12 @@ gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_pu
 - `SessionSidebar.tsx` 是唯一高频冲突点。解决后**必须重跑 `npm test`**，锚点测试会告诉你哪根线掉了。
 - 上游若把 `listSessionFamilies` / `getRecentProjects` 改名或删掉：不要保留旧函数名，把 pin 参数搬到新函数上，并同步改 `lib/pin-fork-anchors.test.mjs`。
 - 上游若自己实现了 pin/收藏（维护者多次提到"要重新设计会话组织"）：**立即停用我们的补丁**，回归纯镜像，把 `package.json` 的改动缩到只剩包名与更新检查。
+  - **2026-10-09 这条触发了。** v0.11.0 里上游给出了统一的 UI state（`lib/session-ui-state.ts` + `app/api/sessions/ui-state`，文件 `pi-web-session-state.json`），包含会话族置顶/归档、项目置顶、手动顺序、折叠态与侧栏归档视图。我们采纳它作为唯一真相源，退役了自己的两套存储与行内按钮/hook；留下的只有三样：Settings → Archives 这个全局页与按项目批量删除（确认词 / 运行中 409 / subagent 级联 / 绝不删代码目录）、pinned-first 比较器（上游不做这件事）、以及一次性 importer `lib/ui-state-migrate.ts`。语义位移三条：归档按**会话族根**落键（同族多个兄弟折叠到最早的时间戳）；迁移过去的项目 pin 盖上迁移时刻；迁移不凭空生成手动顺序。旧文件导入后改名 `*.migrated-<utc>`，不删除。
+
+两条当天踩到的操作坑：
+
+- **委派子代理时写死「禁止 git 写操作」**（add/commit/push、gh workflow run）。这次把一个未提交的合并留在索引里再委派，任何一次 `git commit -a` 都会顺手扫走主代理的判断成果——事实上有次发版就是这么跑在主代理前面的。
+- **`git clean -X` 会把基础设施一起吃掉**。被忽略的东西里包括 `.next/`、`node_modules/`、`tsconfig.tsbuildinfo`。只点名具体文件再删，别图省事执行整条清理。
 
 ---
 

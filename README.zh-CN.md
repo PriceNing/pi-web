@@ -21,8 +21,9 @@
 
 ## 本 fork 多出来的功能
 
-- **服务端置顶**（项目 / 会话）。数据在 `~/.pi/agent/pi-web/pins.json`，同一台 pi-web 服务器上的 PC / 手机 / Pad 看到的是同一份。置顶组在前，组内仍按最近活跃排。
-- **项目归档**。侧栏里的「项目」只是会话按工作区聚出来的视图，不是 pi 里的独立对象。归档只是从侧栏藏起来，**不移动**会话文件。在 **设置 → 归档** 里取消归档，或删除这批聊天（不会删磁盘上的代码目录）。
+- **置顶与归档现在由上游提供**（自 v0.11.0）：统一的服务端状态文件 `~/.pi/agent/pi-web-session-state.json` 保存已置顶/已归档的会话族、置顶项目、手动项目顺序、折叠态和侧栏内的归档视图，并用 revision 计数器让同一台服务器上的每个窗口看到同一份。我们读写都走它。
+- **本 fork 在它之上加的**：**设置 → 归档** 这个全局页（不依赖当前项目），以及按项目的**批量删除**——需要输入确认词（`confirm` / `确认` / `確認`）、有运行中的 agent 时返回 409、subagent 级联、绝不删磁盘上的代码目录。另外仍然属于我们的：pinned-first 排序（上游只按活跃度和手动拖动排），以及为退役存储留下的一次性 importer `lib/ui-state-migrate.ts`。
+- 采纳上游时接受的语义位移：归档条目按**会话族根**落键，同族多个兄弟折叠到最早的那个时间戳；迁移过去的项目 pin 会盖上迁移时刻的时间戳；迁移期间不凭空生成手动顺序。详见 [docs/FORK.md](./docs/FORK.md)。
 
 其余能力与上游相同：与本地 pi CLI 共享 `~/.pi/agent`、同一套会话文件、同一套模型 / 登录 / 技能。
 
@@ -82,7 +83,7 @@ PI_WEB_PASSWORD='足够长的随机密码' pi-web --hostname 0.0.0.0
 ## 注意事项
 
 - **智能体数据**：默认读 `~/.pi/agent`，会话在 `sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`。可用 `PI_CODING_AGENT_DIR` 改目录。
-- **与本地 pi 共享**：模型、设置、凭据仍是 pi 的文件。本 fork 只在 `~/.pi/agent/pi-web/` 下写额外状态（`pins.json`、`archives.json`），不改 `settings.json` / `auth.json` / 会话 jsonl 内容。
+- **与本地 pi 共享**：模型、设置、凭据仍是 pi 的文件。本 fork 不再写属于自己的状态文件——置顶、归档、顺序都在上游的 `~/.pi/agent/pi-web-session-state.json` 里。原先放在 `~/.pi/agent/pi-web/` 下的那两个文件会被导入一次，然后改名成 `*.migrated-<utc>`，不删除。不改 `settings.json` / `auth.json` / 会话 jsonl 内容。
 - **文件访问**仅限已知的项目 / 会话根目录，不是通用文件浏览器。
 - **Git worktree**：见 [Pi Web 里的 Worktree](./docs/worktrees.zh-CN.md)。
 
