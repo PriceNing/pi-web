@@ -49,3 +49,7 @@ e2e_*.mjs
 *.local.md
 *.local.json
 deploy/
+
+# Windows 上部分测试会把带盘符的临时路径压扁成文件名写在仓库根，不是产物。
+# ? 同时覆盖普通冒号与全角冒号两种写法。
+/C?UsersAdministratorAppDataLocalTemp*
