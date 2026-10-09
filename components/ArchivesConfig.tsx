@@ -1,16 +1,24 @@
 "use client";
 
-// [archive-fork] Settings page for archived projects.
+// [archive-fork] Settings page for the unified store's archives.
 //
-// Archive itself is a view flag. Deleting sessions is the dangerous action and
-// lives only here — never on the sidebar project row.
+// Archive itself is a view flag the sidebar owns (`lib/session-ui-state-shared.ts`
+// has the rules, `/api/sessions/ui-state` does the writing); this page only reads
+// the read-only view `GET /api/archives` gives it. Deleting sessions is the
+// dangerous action and lives only here — never on the sidebar project row.
+//
+// Identity discipline: `key` comes from the server (`workspaceKeyOf`). The client
+// treats it as an opaque id; paths are display only, so no path helpers belong in
+// this bundle. Labels stay inside the component (§3.2: nothing goes into the
+// i18n catalog), in the fork's three languages.
 
 import { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { formatRelativeTime } from "@/lib/i18n/format";
-import { archiveSetOf, parseArchivesPayload } from "@/lib/archive-order";
-import { sessionsForProject } from "@/lib/project-groups";
-import type { SessionInfo } from "@/lib/types";
+import {
+  chunkForSessionUiRequests,
+  type SessionUiStateRequest,
+} from "@/lib/session-ui-state-shared";
 import {
   ConfigButton,
   ConfigDetail,
@@ -29,6 +37,22 @@ import {
   ConfigSidebarText,
   ConfigSplitView,
 } from "./SettingsUi";
+
+/** `GET /api/archives` (server-computed identities + display paths). */
+interface ArchivedFamilyRow {
+  id: string;
+  name?: string;
+  firstMessage?: string;
+  messageCount: number;
+  modified: string;
+  archivedAt: number;
+}
+
+interface ArchiveRow {
+  key: string;
+  root: string;
+  families: ArchivedFamilyRow[];
+}
 
 type LabelKey =
   | "title"
@@ -105,12 +129,15 @@ const LABELS: Record<"en" | "zh-CN" | "zh-TW", Record<LabelKey, string>> = {
   },
 };
 
+const UI_STATE_URL = "/api/sessions/ui-state";
+
 function interpolate(template: string, params: Record<string, string | number>): string {
   return template.replace(/\{(\w+)\}/g, (token, name: string) => (
     params[name] === undefined ? token : String(params[name])
   ));
 }
 
+/** Display only — the identity is the server's `key`, never a path. */
 function lastPathSegment(root: string): string {
   const trimmed = root.replace(/[\\/]+$/, "");
   const parts = trimmed.split(/[\\/]/);
@@ -126,19 +153,12 @@ function isDeleteConfirmation(value: string): boolean {
   return word === "confirm" || word === "确认" || word === "確認";
 }
 
-function sessionTitle(session: SessionInfo, untitled: string): string {
-  const named = session.name?.trim();
+function familyTitle(family: ArchivedFamilyRow, untitled: string): string {
+  const named = family.name?.trim();
   if (named) return named;
-  const first = session.firstMessage?.replace(/\s+/g, " ").trim();
+  const first = family.firstMessage?.replace(/\s+/g, " ").trim();
   if (first && first !== "(no messages)") return first;
   return untitled;
-}
-
-interface ArchiveRow {
-  key: string;
-  root: string;
-  modified: string;
-  sessions: SessionInfo[];
 }
 
 export function ArchivesConfig({
@@ -162,35 +182,18 @@ export function ArchivesConfig({
   const load = useCallback(async () => {
     setFailed(false);
     try {
-      const [archiveRes, sessionRes, homeRes] = await Promise.all([
+      const [archiveRes, homeRes] = await Promise.all([
         fetch("/api/archives", { cache: "no-store" }),
-        fetch("/api/sessions", { cache: "no-store" }),
         fetch("/api/home", { cache: "no-store" }),
       ]);
-      if (!archiveRes.ok || !sessionRes.ok) throw new Error("load failed");
-      const archivePayload = parseArchivesPayload(await archiveRes.json());
-      const sessionData = await sessionRes.json() as { sessions?: SessionInfo[] };
-      const sessions = Array.isArray(sessionData.sessions) ? sessionData.sessions : [];
+      if (!archiveRes.ok) throw new Error("load failed");
+      const payload = await archiveRes.json() as { projects?: ArchiveRow[] };
       const homeData = await homeRes.json().catch(() => ({})) as { home?: string };
       if (typeof homeData.home === "string") setHomeDir(homeData.home);
-
-      const archived = archiveSetOf(archivePayload);
-      const next: ArchiveRow[] = [];
-      for (const key of archived) {
-        const roots = sessionsForProject(sessions, key)
-          .filter((session) => session.relation?.kind !== "subagent")
-          .sort((a, b) => b.modified.localeCompare(a.modified));
-        next.push({
-          key,
-          root: roots[0]?.projectRoot ?? roots[0]?.cwd ?? key,
-          modified: roots[0]?.modified ?? "",
-          sessions: roots,
-        });
-      }
-      next.sort((a, b) => b.modified.localeCompare(a.modified));
-      setRows(next);
+      const projects = Array.isArray(payload.projects) ? payload.projects : [];
+      setRows(projects);
       setSelectedKey((current) => (
-        current && next.some((row) => row.key === current) ? current : next[0]?.key ?? null
+        current && projects.some((row) => row.key === current) ? current : projects[0]?.key ?? null
       ));
     } catch {
       setFailed(true);
@@ -203,20 +206,29 @@ export function ArchivesConfig({
 
   const selected = rows.find((row) => row.key === selectedKey) ?? null;
 
-  const unarchive = async (key: string) => {
+  /**
+   * Unarchive through the sidebar's writer (`POST /api/sessions/ui-state`): the
+   * existing `set` action over family root ids, in request-sized chunks. One id
+   * for a single row, every id of the project for the header button.
+   */
+  const unarchive = async (ids: string[]) => {
+    if (ids.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/archives", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, archived: false }),
-      });
-      if (!res.ok) throw new Error("unarchive failed");
+      for (const chunk of chunkForSessionUiRequests(ids)) {
+        const request: SessionUiStateRequest = { action: "set", ids: chunk, archived: false };
+        const res = await fetch(UI_STATE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`unarchive failed: ${res.status}`);
+      }
       setConfirming(false);
       setConfirmText("");
-      setRows((prev) => prev.filter((row) => row.key !== key));
-      setSelectedKey((current) => current === key ? null : current);
+      await load();
     } catch {
       setError(strings.loadFailed);
     } finally {
@@ -299,8 +311,8 @@ export function ArchivesConfig({
                     <ConfigButton
                       variant="secondary"
                       size="small"
-                      disabled={busy}
-                      onClick={() => void unarchive(selected.key)}
+                      disabled={busy || selected.families.length === 0}
+                      onClick={() => void unarchive(selected.families.map((family) => family.id))}
                     >
                       {busy ? strings.busy : strings.unarchive}
                     </ConfigButton>
@@ -308,7 +320,7 @@ export function ArchivesConfig({
                       <ConfigButton
                         variant="danger"
                         size="small"
-                        disabled={busy || selected.sessions.length === 0}
+                        disabled={busy || selected.families.length === 0}
                         onClick={() => { setConfirming(true); setConfirmText(""); setError(null); }}
                       >
                         {strings.deleteSessions}
@@ -324,7 +336,7 @@ export function ArchivesConfig({
                 {confirming && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <span style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-                      {interpolate(strings.deleteConfirmLead, { count: selected.sessions.length })}
+                      {interpolate(strings.deleteConfirmLead, { count: selected.families.length })}
                     </span>
                     <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
                       {strings.deleteConfirmHint}
@@ -368,14 +380,14 @@ export function ArchivesConfig({
                   </div>
                 )}
                 <ConfigSectionTitle>
-                  {interpolate(strings.sessions, { count: selected.sessions.length })}
+                  {interpolate(strings.sessions, { count: selected.families.length })}
                 </ConfigSectionTitle>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2, minHeight: 0, overflowY: "auto" }}>
-                  {selected.sessions.map((session) => {
-                    const title = sessionTitle(session, strings.untitled);
+                  {selected.families.map((family) => {
+                    const title = familyTitle(family, strings.untitled);
                     return (
                       <div
-                        key={session.id}
+                        key={family.id}
                         style={{
                           display: "flex",
                           flexDirection: "column",
@@ -385,12 +397,22 @@ export function ArchivesConfig({
                           background: "var(--bg-hover)",
                         }}
                       >
-                        <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={title}>
-                          {title}
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={title}>
+                            {title}
+                          </span>
+                          <ConfigButton
+                            variant="ghost"
+                            size="small"
+                            disabled={busy}
+                            onClick={() => void unarchive([family.id])}
+                          >
+                            {busy ? strings.busy : strings.unarchive}
+                          </ConfigButton>
                         </div>
                         <div style={{ display: "flex", gap: 8, fontSize: 11, color: "var(--text-muted)" }}>
-                          <span>{formatRelativeTime(session.modified, locale)}</span>
-                          <span>{interpolate(strings.messages, { count: session.messageCount })}</span>
+                          <span>{formatRelativeTime(new Date(family.archivedAt), locale)}</span>
+                          <span>{interpolate(strings.messages, { count: family.messageCount })}</span>
                         </div>
                       </div>
                     );

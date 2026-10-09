@@ -13,6 +13,7 @@ import { sessionPathKey } from "@/lib/session-path";
 import { abortSubagent, getRpcSession, getRpcSessionInfos } from "@/lib/rpc-manager";
 import type { SessionEntry } from "@/lib/types";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "@/lib/subagents";
+import { forgetSessionUiState } from "@/lib/session-ui-state";
 
 export class SessionNotFoundError extends Error {
   constructor(public readonly sessionId: string) {
@@ -172,6 +173,13 @@ export async function deleteSessionById(id: string): Promise<{ deletedSessionIds
     // Upstream addition (kept in sync with app/api/sessions/[id]/route.ts): the
     // manager cache is keyed by path, so a removed file must be dropped too.
     invalidateSessionManagerCache(deletedPath);
+  }
+  // Upstream's sidebar state (pins, archive, project order) is cleared here too,
+  // so a bulk delete through this helper cleans up after itself as well.
+  try {
+    await forgetSessionUiState(deletedSessionIds);
+  } catch (error) {
+    console.warn(`[pi-web] could not clear the sidebar state of deleted session ${id}: ${error instanceof Error ? error.message : String(error)}`);
   }
   invalidateSessionListCache();
   return { deletedSessionIds: [...deletedSessionIds] };

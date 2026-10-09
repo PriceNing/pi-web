@@ -1,7 +1,7 @@
 {
   "name": "@pricening/pi-web",
-  "version": "0.10.2",
-  "description": "Web UI for the pi coding agent (fork of @agegr/pi-web with server-side pinned and archived projects)",
+  "version": "0.11.0",
+  "description": "Web UI for the pi coding agent (personal fork of @agegr/pi-web with a global Archives page that bulk-deletes a project's sessions)",
   "homepage": "https://github.com/PriceNing/pi-web#readme",
   "repository": {
     "type": "git",
@@ -16,8 +16,8 @@
   },
   "forkedFrom": {
     "name": "@agegr/pi-web",
-    "version": "0.10.0",
-    "commit": "86d94e2229f3d552a5b06ff7f79f9e4d09822937",
+    "version": "0.11.0",
+    "commit": "8347ea5c70127ff40e9818a06ad046ce8f107169",
     "url": "https://github.com/agegr/pi-web"
   },
   "license": "MIT",
@@ -60,14 +60,14 @@
     "release:pin:latest": "npm run build && npm publish"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "1.0.0",
-    "@earendil-works/pi-ai": "1.0.0",
-    "@earendil-works/pi-coding-agent": "1.0.0",
-    "@earendil-works/pi-tui": "1.0.0",
+    "@earendil-works/pi-agent-core": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "js-yaml": "^5.2.3",
-    "next": "16.3.6",
+    "next": "16.3.8",
     "node-pty": "1.2.0-beta.15",
     "proper-lockfile": "4.1.2",
     "react": "^19.2.4",
@@ -89,7 +89,7 @@
     "@types/web-push": "^3.6.4",
     "ansi_up": "^6.0.6",
     "eslint": "^9",
-    "eslint-config-next": "16.3.6",
+    "eslint-config-next": "16.3.8",
     "jiti": "^2.7.0",
     "katex": "^0.16.47",
     "mammoth": "^1.12.0",

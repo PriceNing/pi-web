@@ -38,6 +38,16 @@ export function getRecentProjects(
     .map(([key, { root }]) => ({ key, root }));
 }
 
+// [archive-fork] Ours: the archive page and its bulk delete need the sessions of
+// one projectKey. Upstream's version of this file has no such export, so it lives
+// here as part of the patch set (see docs/FORK.md §2.1).
+export function sessionsForProject(
+  sessions: readonly SessionInfo[],
+  projectKey: string,
+): SessionInfo[] {
+  return sessions.filter((session) => workspaceKeyOf(session) === projectKey);
+}
+
 export function getProjectActivity(
   sessions: readonly SessionInfo[],
   runningSessionIds: ReadonlySet<string>,
@@ -56,11 +66,4 @@ export function getProjectActivity(
     if (unreadSessionIds.has(session.id)) entry.unread++;
   }
   return counts;
-}
-
-export function sessionsForProject(
-  sessions: readonly SessionInfo[],
-  projectKey: string,
-): SessionInfo[] {
-  return sessions.filter((session) => workspaceKeyOf(session) === projectKey);
 }

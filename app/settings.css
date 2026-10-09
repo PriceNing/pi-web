@@ -1520,19 +1520,17 @@
   min-height: 0;
 }
 
+/* The page scrolls across the dialog's full width, so its scrollbar sits at the
+   dialog's edge; only the content keeps a readable column. */
 .settings-general {
   width: 100%;
-  max-height: 100%;
-  max-width: 680px;
+  height: 100%;
   padding: 26px clamp(18px, 4vw, 40px) 40px;
   overflow-y: auto;
 }
 
-.settings-general-title {
-  margin: 0;
-  color: var(--text);
-  font-size: 18px;
-  font-weight: 700;
+.settings-general > * {
+  max-width: 600px;
 }
 
 .settings-general-section {
@@ -1540,7 +1538,7 @@
 }
 
 .settings-general-section:first-of-type {
-  margin-top: 24px;
+  margin-top: 0;
 }
 
 .settings-general-heading {
@@ -2150,6 +2148,19 @@
   font-family: var(--font-mono);
   font-size: 12px;
   outline: none;
+}
+
+/* macOS draws the native arrow against the border, ignoring the padding: a chevron of
+   our own, in the theme's dim text color, as far from the right edge as the text is from the left. */
+select.mcp-add-input {
+  appearance: none;
+  padding-right: 30px;
+  background-image:
+    linear-gradient(45deg, transparent 40%, var(--text-dim) 40%, var(--text-dim) 60%, transparent 60%),
+    linear-gradient(-45deg, transparent 40%, var(--text-dim) 40%, var(--text-dim) 60%, transparent 60%);
+  background-size: 5px 5px;
+  background-position: right 15px center, right 10px center;
+  background-repeat: no-repeat;
 }
 
 .mcp-add-toggle {
