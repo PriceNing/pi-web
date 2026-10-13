@@ -1,6 +1,6 @@
 {
   "name": "@pricening/pi-web",
-  "version": "0.11.0",
+  "version": "0.12.1",
   "description": "Web UI for the pi coding agent (personal fork of @agegr/pi-web with a global Archives page that bulk-deletes a project's sessions)",
   "homepage": "https://github.com/PriceNing/pi-web#readme",
   "repository": {
@@ -16,8 +16,8 @@
   },
   "forkedFrom": {
     "name": "@agegr/pi-web",
-    "version": "0.11.0",
-    "commit": "ee78105d5b9ab5a64a4b8deb4a0297bafb0c54ee",
+    "version": "0.12.1",
+    "commit": "f83b1a5",
     "url": "https://github.com/agegr/pi-web"
   },
   "license": "MIT",
@@ -60,10 +60,13 @@
     "release:pin:latest": "npm run build && npm publish"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "1.1.0",
-    "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-coding-agent": "1.1.0",
-    "@earendil-works/pi-tui": "1.1.0",
+    "@earendil-works/pi-agent-core": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-codemode": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-mcp": "1.2.0",
+    "@earendil-works/pi-telemetry": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "js-yaml": "^5.2.3",
