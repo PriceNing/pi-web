@@ -626,6 +626,50 @@ systemctl --user restart pi-web && systemctl --user is-active pi-web   # 卸完�
 - 快速判断"服务的是哪个构建"：`curl -s http://127.0.0.1:30141/api/pins` —— 官方包没有这个路由，
   会返回 Next 的 404 HTML。
 
+### 7.7 运维归档误伤 `~/.pi`（2026-10-20 在 202 上实际发生）
+
+202 的 `~/.pi`（19 个会话、auth.json、models.json、pi-web-session-state.json）被一次
+「运维归档」搬进了 `/home/nrc/ops-archive-202610/misc/.pi`——那个目录是别的项目
+（llama.cpp、open-webui 等）的杂物堆。后果：
+
+- pi-web 的 **unit 文件和安装目录也一起没了**（`~/.config/systemd/user/pi-web.service`、
+  `~/.npm-global/`）；
+- systemd 内存里还留着旧定义，所以**服务进程照常跑、端口照常听、端点照常返回 200**，
+  但 `~/.pi` 没了 → 它读到的是**空数据**（`/api/sessions` 返回 `sessions: []`）；
+- `systemctl --user status` 会显示 unit 标记为 `bad`、并警告
+  "pi-web.service changed on disk, the version systemd has loaded is outdated"。
+
+**教训：服务活着 ≠ 服务正常。** 判断一台机器上的 pi-web 是否真的健康，要看**数据**：
+
+```bash
+curl -s http://127.0.0.1:30141/api/sessions | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["sessions"]))'
+# 0 = 服务在空数据上跑（多半是 ~/.pi 没了或搬走了）
+systemctl --user status pi-web | grep -i "changed on disk"   # 有这行 = unit 文件在磁盘上已不存在
+```
+
+修复顺序（202 上已实测走通）：
+
+```bash
+# 1) 把数据搬回来（**复制**，保留归档原件当备份）
+cp -a /home/nrc/ops-archive-202610/misc/.pi /home/nrc/.pi
+find ~/.pi/agent/sessions -name '*.jsonl' | wc -l        # 确认会话回来了
+
+# 2) 重装（精确版本）
+npm install -g --prefix ~/.npm-global @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
+
+# 3) 重建 unit（模板：scripts/pi-web.service）
+mkdir -p ~/.config/systemd/user && cp <仓库>/scripts/pi-web.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+
+# 4) 重启并验收
+systemctl --user restart pi-web
+curl -s http://127.0.0.1:30141/api/sessions | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["sessions"]))'
+systemctl --user enable pi-web      # 补上开机自启（重建 unit 后会丢）
+```
+
+`~/.pi` 里没有 `PI_CODING_AGENT_DIR` 覆盖时，pi-web 读的就是 `~/.pi/agent`；
+所以 **`~/.pi` 一旦被搬走，pi-web 会静默地变成一个空壳**。
+
 ---
 
 ## 8. 与 local pi 共享状态的边界（红线）
