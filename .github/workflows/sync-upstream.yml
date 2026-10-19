@@ -249,25 +249,34 @@ jobs:
           published_now() {
             npm view "$PKG@$1" version --registry "$REGISTRY" 2>/dev/null | grep -q "$1"
           }
+          # 等待时长：实测 npm 的后处理队列最长到过 1 小时（2026-10-19 的 0.12.4
+          # 发布后约 1 小时才出现在 registry）。所以这里等得比之前长得多：
+          # 急着换号重发反而会撞上 E409——那个号其实已经发布成功了，只是还没放出来。
           for attempt in 1 2 3; do
             publish_once "$version" || exit 1
             # 确认版本真的可查。dist-tags 路由比 packument 路由先可用，所以两个都查。
-            for wait in 1 2 3 4 5 6; do
+            for wait in $(seq 1 20); do
               echo "确认 $version 是否已到 registry（第 $wait 次）…"
               if published_now "$version"; then
                 echo "✅ $version 已经在 registry 上"
                 echo "version=$version" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
-              echo "  还没到，等 60 秒（npm 的后处理队列）"
+              echo "  还没到，等 60 秒（npm 的后处理队列，实测最长约 1 小时）"
               sleep 60
             done
             if [ "$attempt" = "3" ]; then
               echo "::error title=发布未生效::$version 发了三次都查不到。npm 把它卡在了后处理队列里。此时不能用同一个版本号重发（会 E409），只能换一个更高的号：把 package.json 的 version 调高一级再触发发版。"
               exit 1
             fi
-            # 同一个号被 staged 之后就不能再用了，必须换一个更高的。
-            version=$(node scripts/next-version.mjs --published "$version")
+            # 换一个更高的号重发。**先确认那个号没被占用**：
+            # 被 npm staged 过的号（发过但还没放出来）再发会 E409。
+            next=$(node scripts/next-version.mjs --published "$version")
+            while npm view "$PKG@$next" version --registry "$REGISTRY" 2>/dev/null | grep -q "$next"; do
+              echo "  $next 已被占用，继续往上找…"
+              next=$(node scripts/next-version.mjs --published "$next")
+            done
+            version="$next"
             echo "::warning title=换版本号重发::$version 没有出现，改为 $version 重发（被 staged 的版本号不能再用）"
             npm version "$version" --no-git-tag-version --allow-same-version
             # 重新构建：tarball 里打包的是构建产物，版本号变了就得重建，
