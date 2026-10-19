@@ -22,11 +22,13 @@ function makeRepos() {
   const root = mkdtempSync(join(tmpdir(), "pi-web-merge-"));
   const upstream = join(root, "upstream");
   const fork = join(root, "fork");
-  execFileSync("git", ["init", "--initial-branch=main", upstream], { encoding: "utf8" });
-  execFileSync("git", ["init", "--initial-branch=main", fork], { encoding: "utf8" });
+  // --initial-branch 需要 git >= 2.28；用 init 后再 checkout -B main 更稳。
+  execFileSync("git", ["init", upstream], { encoding: "utf8" });
+  execFileSync("git", ["init", fork], { encoding: "utf8" });
   for (const dir of [upstream, fork]) {
     git(dir, ["config", "user.name", "t"]);
     git(dir, ["config", "user.email", "t@example.com"]);
+    git(dir, ["checkout", "-B", "main"]);
   }
   // 上游的初始内容
   writeFileSync(join(upstream, "README.md"), "upstream readme\n", "utf8");
@@ -36,7 +38,8 @@ function makeRepos() {
   // fork 从上游起步，再放我们自己的门面
   git(fork, ["remote", "add", "upstream", upstream]);
   git(fork, ["fetch", "upstream", "main"]);
-  git(fork, ["checkout", "-b", "main", "FETCH_HEAD"]);
+  // 用 checkout -B 而不是 -b：clone 出来的 main 已经存在，-b 会报 "already exists"。
+  git(fork, ["checkout", "-B", "main", "FETCH_HEAD"]);
   writeFileSync(join(fork, "README.md"), "our readme\n", "utf8");
   writeFileSync(join(fork, "README.zh-CN.md"), "我们的中文门面\n", "utf8");
   git(fork, ["add", "-A"]);

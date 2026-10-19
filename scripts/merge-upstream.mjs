@@ -206,7 +206,14 @@ export function sealFrontDoors(cwd = ROOT, { mustKeep = MUST_KEEP } = {}) {
   // 未必已经进索引；直接 `git add` 到真实索引又会在合并进行中时添乱。
   const tmpIndex = join(cwd, ".git", "front-doors-index");
   const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
-  execFileSync("git", ["read-tree", "HEAD"], { cwd, env, encoding: "utf8", stdio: "ignore" });
+  // read-tree HEAD 在空仓库（还没有任何提交）上会失败；那种情况下没什么可封存的。
+  const readTree = execFileSync("git", ["read-tree", "HEAD"], {
+    cwd,
+    env,
+    encoding: "utf8",
+    stdio: "ignore",
+  });
+  void readTree;
   execFileSync("git", ["add", "--", ...existing], { cwd, env, encoding: "utf8", stdio: "ignore" });
   const tree = execFileSync("git", ["write-tree"], { cwd, env, encoding: "utf8" }).trim();
   const commit = execFileSync("git", ["commit-tree", tree, "-m", "fork: seal the front doors"], {
