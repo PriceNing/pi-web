@@ -300,6 +300,28 @@ fetch upstream → merge → 写 forkedFrom → npm ci → lint → tsc → npm 
   比较 `next` 与 `published`，而版本规则保证 `next` 永远更大，会导致每天发一个内容相同的空版本。
 - **OIDC 优先，失败不静默降级**：兜底分支只在 `NPM_TOKEN` 存在时才生效；现在没有 secret，
   所以 OIDC 一失败就直接变红，不会默默发出一个没有 provenance 的包而无人察觉。
+- **发完必须验证**：npm publish 退出码 0 不代表版本能装（详见 §6.5），所以发布步骤会
+  在 registry 上查这个版本号，查不到就等、换号重发。
+
+### 5.4 演示站（GitHub Pages）
+
+`demo/` 里的静态演示站由 `.github/workflows/demo-pages.yml` 发布到
+`https://pricening.github.io/pi-web/`。
+
+**它需要仓库开启 Pages**，而 Pages 是**仓库设置**、不在代码里：
+workflow 里的 `actions/configure-pages@v5` 调 `GET /repos/{owner}/{repo}/pages`，
+仓库没开 Pages 就返回 404，整个 job 15 秒内挂掉（2026-10-19 之前每次 push 都红）。
+
+开启方式（一次即可，需要仓库 admin 权限）：
+
+```bash
+gh api --method POST repos/PriceNing/pi-web/pages --input - <<'EOF'
+{"build_type":"workflow"}
+EOF
+```
+
+开完之后 workflow 自己会 build + deploy，不用再管。
+`build_type: workflow` 表示「由 workflow 部署」，不选它就得自己管构建产物。
 
 ### 5.3 灰度：放在安装层，不放在 registry tag 层
 
@@ -694,8 +716,9 @@ pin / archive 数据落在 `~/.pi/agent/pi-web/{pins,archives}.json`：备份/�
 | CI 发版 | **Trusted Publishing (OIDC)** —— 唯一通道 | 无 secret、无过期、带 provenance。已在 v0.9.6 实测（仓库 secrets 为空仍发布成功） |
 | 本机应急发布 | **web login**：`npm login --registry=https://registry.npmjs.org/ --auth-type=web` | 2FA 走交互（通行密钥），不绕过。注意本机 `~/.npmrc` 若指向只读镜像，必须显式带 `--registry` |
 | CI 兜底 token | **当前不存在**（已删除并 revoke） | 重建见 §5.1「历史：如何破冰」 |
+| 改 dist-tag（删 `next` 等） | **需要 npmjs.com 的 automation token** | OIDC 做不到（见下面第 4 条） |
 
-三条实测出来的硬约束（别凭直觉配置）：
+四条实测出来的硬约束（别凭直觉配置）：
 
 1. **账号开启"发布需要 2FA"后，普通 granular token 发不了**（`403 ... bypass 2fa enabled is
    required to publish packages`）。能发的只有勾了 Bypass 2FA 的 token —— 而 npm 已公告
@@ -705,6 +728,37 @@ pin / archive 数据落在 `~/.pi/agent/pi-web/{pins,archives}.json`：备份/�
    因此灰度不能设计成"CI 发 `next`、人工提升 `latest`"（提升这步没人能做），只能放在安装层（§5.3）。
 3. **Node 22 自带 npm 10.x 不支持 OIDC**，`npm publish --provenance` 报 `ENEEDAUTH`，与"没配好
    trusted publisher"现象相同。CI 里必须先 `npm install -g npm@11`。
+4. **Trusted Publishing 不包含 dist-tag 写权限**（2026-10-19 实测）：
+   `npm dist-tag rm` 在 OIDC 下返回 `401 Unauthorized - PUT .../dist-tags/next`。
+   npm 的授权范围只有 `publish`。所以「让 CI 顺手把陈旧的 `next` 标签删掉」在 OIDC 下做不成。
+
+### 9.1 删掉陈旧 dist-tag 的唯一路径
+
+2026-10-19 的实测结论：这个包还留着一个 `next` 标签，指向 0.9.1（2026-09-16），
+早被 `latest` 超过，留着会让 `npm i @pricening/pi-web@next` 装到一个月前的旧版本。
+
+我们只发 `latest`（理由见 §5.3），所以 `next` 是个陷阱，要删。
+
+**需要你做一次**（因为只有账号所有者能签发 automation token）：
+
+```bash
+# 1) 在 npmjs.com 生成一个 automation token：
+#    Access Tokens → Generate New Token → Automation
+#    勾选 "Read and write"（改 dist-tag 需要写权限）
+#    只对这个包有效最好（Package access: 只选 @pricening/pi-web）
+
+# 2) 存进仓库 secret（CI 里就能自动清理）
+gh secret set NPM_TOKEN --repo PriceNing/pi-web --body "<那个 token>"
+
+# 3) 触发清理（不改版本、不发版）
+gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f fix_dist_tag=true
+```
+
+`fix_dist_tag` 这个 dispatch input 就是为它准备的：它只跑清理那一步，
+不构建、不发版。workflow 里那一步会**先试 OIDC、再退到 `NPM_TOKEN`**，
+所以配了 secret 之后它一定能删掉；没配则只留一条 warning，不影响 `latest`。
+
+> 凭据只进 GitHub secret，**不要**写进本仓库任何文件（见 §0 的红线）。
 
 ---
 
