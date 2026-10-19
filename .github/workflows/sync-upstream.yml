@@ -18,6 +18,10 @@ on:
         description: "上游无新提交时也强制走一次发布"
         type: boolean
         default: false
+      fix_dist_tag:
+        description: "只清理陈旧的 npm dist-tag（不发布）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write # 推送 main 与创建 Release
@@ -285,6 +289,42 @@ jobs:
             git add package.json package-lock.json
             git diff --cached --quiet || git commit -m "chore(release): v${version}"
           done
+
+      - name: 清理陈旧的 dist-tag（next）
+        if: steps.version.outputs.skip != '1' || inputs.fix_dist_tag == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # 我们只发 latest，不发 next。但早年的发布给这个包留了一个
+          # `next` 标签（指向 0.9.1，2026-09-16），它早被 latest 超过，
+          # 留着只会让人装到一个月前的旧版本。
+          current_next=$(npm dist-tag ls "$PKG" --registry "$REGISTRY" 2>/dev/null | awk '/^next:/{print $2}')
+          if [ -z "$current_next" ]; then
+            echo "没有 next 标签，无需清理"
+            exit 0
+          fi
+          published_now="${{ steps.publish.outputs.version || steps.version.outputs.next }}"
+          if [ -n "$published_now" ] && [ "$current_next" = "$published_now" ]; then
+            echo "next 已经指向本次发布的版本，无需处理"
+            exit 0
+          fi
+          echo "要清理陈旧的 next 标签（指向 $current_next）"
+          # 先试 OIDC：npm 的 Trusted Publishing 授权是按 (包, workflow 文件名, 分支)
+          # 绑定的，这个 workflow 文件名在授权里，所以 dist-tag 也可能被放行。
+          # 不行再退到 NPM_TOKEN（OIDC 明确只授权 publish 时会 401）。
+          rm -f ~/.npmrc
+          if npm dist-tag rm "$PKG" next --registry "$REGISTRY" 2>/dev/null; then
+            echo "✅ 已用 OIDC 清理 next 标签"
+            exit 0
+          fi
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
+            if npm dist-tag rm "$PKG" next --registry "$REGISTRY"; then
+              echo "✅ 已用 NPM_TOKEN 清理 next 标签"
+              exit 0
+            fi
+          fi
+          echo "::warning title=未能清理 next 标签::next 仍指向 $current_next。OIDC 不能改 dist-tag 时，需要一个能改 dist-tag 的 npm automation token（存在仓库 secrets 的 NPM_TOKEN 里）。不影响 latest。"
 
       - name: 打包 tarball 作为 Release 附件（内网/镜像拉不到 npm 时的兜底）
         if: steps.version.outputs.skip != '1'
