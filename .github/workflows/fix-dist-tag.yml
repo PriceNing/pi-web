@@ -1,0 +1,22 @@
+name: Fix npm dist-tag
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@11
+      - name: 尝试用 OIDC 改 dist-tag
+        run: |
+          npm dist-tag add @pricening/pi-web@0.12.4 next --registry=https://registry.npmjs.org/
+          npm dist-tag ls @pricening/pi-web --registry=https://registry.npmjs.org/
