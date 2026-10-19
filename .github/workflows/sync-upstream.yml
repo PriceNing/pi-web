@@ -291,7 +291,9 @@ jobs:
           done
 
       - name: 清理陈旧的 dist-tag（next）
-        if: steps.version.outputs.skip != '1' || inputs.fix_dist_tag == 'true'
+        # 不用 job 级 if：dispatch 的 boolean input 在那里求值不稳（实测会被跳过）。
+        # 改成在步骤内部判断 github.event.inputs（dispatch 时的原始字符串）。
+        if: always() && (steps.version.outputs.skip != '1' || github.event.inputs.fix_dist_tag == 'true')
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
