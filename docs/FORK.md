@@ -387,7 +387,29 @@ gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_pu
 - `package.json`：我们的身份字段（`name` / `description` / `homepage` / `repository` / `bugs` / `publishConfig` / `forkedFrom`）永远是 ours；其余（依赖、脚本、engines）取上游；**依赖取并集**（上游新增的不能丢，我们独有的也不能丢）；`version` 保留 ours，发版流程会覆盖它。
 - `package-lock.json`：**必须重新生成**，不能合并。它的 `name` 字段写死了包名（上游 `@agegr/pi-web`，我们 `@pricening/pi-web`），两边必然冲突，而合并出来的 lock 哈希与我们的包名对不上，`npm ci` 会直接报错。CI 里在合并后跑 `npm install --package-lock-only`。
 
-### 6.5 旧的人工流程（仅作参考，勿用）
+### 6.5 npm 发布后处理的队列（2026-10-19 实测）
+
+`npm publish` 退出码 0 **不代表**版本能装。它会把包放进 npm 自己的后处理队列
+（`Your package is being processed and may take a few minutes to become available.`），
+而这个队列：
+
+- 最长拖到过**约 1 小时**（0.12.4：发布报成功、provenance 写进了 sigstore、
+  GitHub Release 也建了，45 分钟后 registry 里仍然查不到，一小时后才出现）；
+- 有时会把版本**卡住**。一旦卡住，同一个版本号再发会得到
+  `E409 Cannot publish over previously staged version`——
+  npm 的措辞是 "previously published" 还是 "previously staged" 取决于它当时的状态，
+  两种都意味着**那个号不能再用了**。
+
+所以发版流程必须**验证**而不是相信退出码（`sync-upstream.yml` 的「发布到 npm」步骤）：
+
+1. 发完在 registry 上查这个版本号（`npm view $PKG@$version`）；
+2. 查不到就**等**（每轮 20 分钟，npm 的队列就是这么慢）；
+3. 等三轮还没有，就换一个**更高的、且未被占用**的版本号，重新构建、重新发；
+4. 后面的打 tag、建 Release、摘要都用**实际发出去的那个版本号**，不是原计划的。
+
+急着重发同一个号只会撞 E409——那个号其实已经发布成功了，只是还没放出来。
+
+### 6.6 旧的人工流程（仅作参考，勿用）
 
 ```bash
 git fetch --no-tags --prune upstream "+refs/heads/main:refs/remotes/upstream/main"
