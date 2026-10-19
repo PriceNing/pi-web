@@ -47,6 +47,19 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 
 ## 2. 当前本地改动清单
 
+### 2.-1 同步根治（2026-10-19 新增）
+
+| 文件 | 职责 |
+|---|---|
+| `scripts/merge-upstream.mjs` | 策略化上游合并：方向表自动解冲突、恢复被删的面门、封存 `fork-front-doors` tag、需要人判断时开 issue |
+| `scripts/merge-package-json.mjs` | `package.json` 结构化合成：我们的身份字段 + 上游的依赖（依赖取并集） |
+| `lib/session-delete-compat.ts` | 归档页的删除入口包装（住在自有文件里，让上游的 `lib/session-delete.ts` 保持逐字一致） |
+| `lib/upstream-files-untouched.test.mjs` | 逐字节对比 `upstream/main`，把「不改上游文件」变成测试 |
+| `scripts/merge-upstream.test.mjs` / `.e2e.test.mjs` / `merge-package-json.test.mjs` | 策略表、端到端合并行为、package.json 合成的测试 |
+| `README.md` / `README.zh-CN.md` / `README.ja.md` / `README.ru.md` | 四个门面（受 `MUST_KEEP` 与 `fork-front-doors` tag 保护） |
+
+详见 §6。
+
 ### 2.1 服务端置顶（pin 项目 / 会话）
 
 **动机**：项目和会话一多就找不到。且必须**服务端存储**——localStorage 是每个浏览器一份，PC / 手机 / Pad 三端会各自为政。
@@ -312,20 +325,54 @@ npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 
 ## 6. 上游同步
 
+### 6.0 根治后的同步流程（2026-10 起）
+
+同步不再靠“撞了冲突再人工判断”，而是靠三个部件：
+
+| 部件 | 作用 |
+|---|---|
+| `scripts/merge-upstream.mjs` | 策略化合并：方向已定的冲突自动解，方向不明的才停下并**开 issue** |
+| `scripts/merge-package-json.mjs` | `package.json` 的**结构化**合成：我们的身份 + 上游的依赖 |
+| `lib/session-delete-compat.ts` 等自有文件 | 我们的接线住在**新文件**里，上游的文件保持逐字一致 |
+
+一条命令完成本地同步：
+
+```bash
+node scripts/merge-upstream.mjs
+```
+
+它会依次：fetch origin 并折进 `origin/main`（含 CI 推的 `chore(release)` 标记，否则本地推送会被判非快进）→ fetch upstream（不取 tag）→ 合并 `upstream/main` → 按策略自动解冲突 → 恢复被上游删掉的面门 → 写 `.merge-upstream-report.json`。
+
+**冲突方向表**（`scripts/merge-upstream.mjs` 里的 `POLICY`）：
+
+- `ours`：我们的门面 `README.md` / `README.zh-CN.md` / `README.ja.md` / `README.ru.md`
+- `theirs`：上游负责的 `docs/README.*.md`（上游自己的译文）、`app/api/sessions/[id]/route.ts`、`lib/session-delete.ts`、`package-lock.json`
+- `package.json`：走 `scripts/merge-package-json.mjs` 结构化合成（不是整块取一边）
+- 其余：需要人判断，脚本会开 issue 并停下
+
+**必须守住的纪律：不要改上游的文件。** 上游的文件一旦被我们改过，以后每次同步都会在那里冲突。要扩展就新建文件、在调用点接线；实在必须改的，登记进 `POLICY` 表。`lib/upstream-files-untouched.test.mjs` 会逐字节对比 `upstream/main`，把这条纪律变成测试。
+
 ### 6.1 CI 自动成功时
 
 什么都不用做。
 
-### 6.2 CI 报冲突时（本地手工）
+### 6.2 门面的保护（`fork-front-doors` tag）
+
+上游 2026-10-14 那次提交（`7cc1803`）把多语言 README 挪进了 `docs/`，那次是「重命名 + 删除」：它自己的三个译文被搬走了，而我们 fork 的 `README.zh-CN.md` 因为内容不同没被一起搬走，于是被**单独删除**——英文门面的链接当场变成死链。
+
+因此：
+
+- 四个门面文件列在 `MUST_KEEP` 里，上游删掉或改名搬走时，合并脚本会把它们恢复回来；
+- 合并成功后脚本把当前门面内容打进 `fork-front-doors` tag，作为**与历史深度无关**的权威副本；
+- 恢复源顺序：合并前的提交 → `fork-front-doors` tag。
+
+### 6.3 CI 报冲突时（本地手工）
 
 ```bash
-# 不要带 --tags：上游与我们有同名 tag（实测 v0.9.2 / v0.9.3 同名不同 commit），
-# 它会让 fetch 以退出码 1 结束，详见 §5.2。
-git fetch --no-tags --prune upstream "+refs/heads/main:refs/remotes/upstream/main"
-git merge upstream/main
-# 解决冲突：优先保留上游实现，再把 [xxx-fork] 接线重新插回去
-npm install            # 上游可能加依赖；lock 自动合并不代位可靠
-npm run lint && npx tsc --noEmit
+node scripts/merge-upstream.mjs
+# 退出码 2 = 有需要人判断的文件（脚本已开 issue）。解完：
+npm install            # lock 必须重新生成，不能合并（见 6.4）
+npm run lint && npx tsc --noEmit && npm test
 node scripts/set-forked-from.mjs \
   --version "$(git show upstream/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")" \
   --commit "$(git rev-parse upstream/main)"
@@ -333,6 +380,18 @@ git push origin main
 # 然后手动触发一次；必须带 force_publish=true——本地已把上游合完，
 # CI 看到 incoming=0 会直接跳过发版。
 gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_publish=true
+```
+
+### 6.4 `package.json` 与 `package-lock.json`
+
+- `package.json`：我们的身份字段（`name` / `description` / `homepage` / `repository` / `bugs` / `publishConfig` / `forkedFrom`）永远是 ours；其余（依赖、脚本、engines）取上游；**依赖取并集**（上游新增的不能丢，我们独有的也不能丢）；`version` 保留 ours，发版流程会覆盖它。
+- `package-lock.json`：**必须重新生成**，不能合并。它的 `name` 字段写死了包名（上游 `@agegr/pi-web`，我们 `@pricening/pi-web`），两边必然冲突，而合并出来的 lock 哈希与我们的包名对不上，`npm ci` 会直接报错。CI 里在合并后跑 `npm install --package-lock-only`。
+
+### 6.5 旧的人工流程（仅作参考，勿用）
+
+```bash
+git fetch --no-tags --prune upstream "+refs/heads/main:refs/remotes/upstream/main"
+git merge upstream/main
 ```
 
 发版后 npm 有几分钟的**发布后处理**延迟（provenance + 6.8MB tarball），日志会写
@@ -345,6 +404,7 @@ gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_pu
 
 - `SessionSidebar.tsx` 是唯一高频冲突点。解决后**必须重跑 `npm test`**，锚点测试会告诉你哪根线掉了。
 - 上游若把 `listSessionFamilies` / `getRecentProjects` 改名或删掉：不要保留旧函数名，把 pin 参数搬到新函数上，并同步改 `lib/pin-fork-anchors.test.mjs`。
+- **2026-10-19 根治记录**：上一次同步（0.12.2）撞了 6 个冲突（README、docs 三个译文、`[id]` 路由、package.json），连续 5 晚定时同步全红。根因不是“冲突难解”，而是**我们把东西塞进了上游的文件**（`lib/session-delete.ts` 里的包装、README 门面）——文件一旦被我们改过，每次同步都会在那里冲突。现在的做法：上游文件保持逐字一致，接线搬进自有文件，方向表交给脚本。
 - 上游若自己实现了 pin/收藏（维护者多次提到"要重新设计会话组织"）：**立即停用我们的补丁**，回归纯镜像，把 `package.json` 的改动缩到只剩包名与更新检查。
   - **2026-10-09 这条触发了。** v0.11.0 里上游给出了统一的 UI state（`lib/session-ui-state.ts` + `app/api/sessions/ui-state`，文件 `pi-web-session-state.json`），包含会话族置顶/归档、项目置顶、手动顺序、折叠态与侧栏归档视图。我们采纳它作为唯一真相源，退役了自己的两套存储与行内按钮/hook；留下的只有三样：Settings → Archives 这个全局页与按项目批量删除（确认词 / 运行中 409 / subagent 级联 / 绝不删代码目录）、pinned-first 比较器（上游不做这件事）、以及一次性 importer `lib/ui-state-migrate.ts`。语义位移三条：归档按**会话族根**落键（同族多个兄弟折叠到最早的时间戳）；迁移过去的项目 pin 盖上迁移时刻；迁移不凭空生成手动顺序。旧文件导入后改名 `*.migrated-<utc>`，不删除。
 
@@ -647,8 +707,10 @@ Windows 本机跑 `npm test` 已不再是“只差 2 个”：上游 v0.10.0 那
 
 你需要**主动看一眼**的三种情况：
 
-1. **CI 变红（合并冲突）**：日志会点名可能涉及的文件。按 §6.2 本地 merge 一次即可。
-   特别注意：若冲突在 `package.json` 的 `version` 行，**保留我们自己的序列**（`forkedFrom` 由 CI 自动写）。
+1. **CI 变红（合并需要人判断）**：脚本已自动解开方向已定的冲突，剩下的会在仓库里开一个
+   issue 列出需要人判断的文件。按 §6.3 本地跑 `node scripts/merge-upstream.mjs` 处理。
+   特别注意：若冲突在 `package.json`，**不要整块取一边**——用 `scripts/merge-package-json.mjs`
+   的结构化合成（我们的身份 + 上游的依赖）；`forkedFrom` 由 CI 自动写。
 2. **上游自己实现了 pin / 收藏**（维护者多次提到要"重新设计会话组织"）：**立刻停用我们的补丁**，
    否则两套置顶逻辑会打架。做法：合并后
    ```bash
@@ -667,7 +729,7 @@ Windows 本机跑 `npm test` 已不再是“只差 2 个”：上游 v0.10.0 那
 ```powershell
 npm i -g @pricening/pi-web@<上一个可用版本> --registry=https://registry.npmjs.org/   # 回滚
 ```
-置顶数据存在 `~/.pi/agent/pi-web/pins.json`，**与包版本无关**，回退不丢数据；GitHub Release 上每个版本的 tarball 永久保留，可离线安装。
+置顶数据存在上游的统一状态文件 `~/.pi/agent/pi-web-session-state.json`，**与包版本无关**，回退不丢数据；GitHub Release 上每个版本的 tarball 永久保留，可离线安装。
 
 ### 12.2 我自己又有了新需求，怎么做？
 

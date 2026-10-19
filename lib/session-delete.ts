@@ -247,20 +247,3 @@ export async function deleteSessions(
   invalidateSessionListCache();
   return { deleted: [...deletedSessionIds], missing, running };
 }
-
-/**
- * [archive-fork] 兼容包装：我们的归档页批量删除与 DELETE 路由逐条走这个
- * 入口，实现仍然只有上面这一份（上游的 deleteSessions）。
- */
-export class SessionNotFoundError extends Error {
-  constructor(public readonly sessionId: string) {
-    super("Session not found");
-    this.name = "SessionNotFoundError";
-  }
-}
-
-export async function deleteSessionById(id: string): Promise<{ deletedSessionIds: string[] }> {
-  const result = await deleteSessions([id]);
-  if (result.missing.length > 0) throw new SessionNotFoundError(id);
-  return { deletedSessionIds: result.deleted };
-}

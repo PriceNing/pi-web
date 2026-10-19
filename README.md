@@ -1,6 +1,6 @@
 # @pricening/pi-web
 
-[简体中文](./README.zh-CN.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
 A **personal fork** of [agegr/pi-web](https://github.com/agegr/pi-web), the local browser UI for the [pi coding agent](https://github.com/earendil-works/pi).
 

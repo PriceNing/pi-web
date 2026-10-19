@@ -9,7 +9,7 @@ import {
 } from "@/lib/session-reader";
 import { getRpcSessionInfos, getRunningRpcSessionIds } from "@/lib/rpc-manager";
 import { sessionsForProject } from "@/lib/project-groups";
-import { deleteSessionById, SessionNotFoundError } from "@/lib/session-delete";
+import { deleteSessionById, SessionNotFoundError } from "@/lib/session-delete-compat";
 
 export const dynamic = "force-dynamic";
 

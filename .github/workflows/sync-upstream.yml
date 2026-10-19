@@ -69,20 +69,44 @@ jobs:
           # 写死 refspec + --no-tags 是为了连“tag 自动跟随”也关掉，避免上游再打同名 tag。
           git fetch --no-tags --prune upstream "+refs/heads/main:refs/remotes/upstream/main"
 
-      - name: 合并上游（冲突即停，不发布）
+      - name: 合并上游（策略化解冲突，只有人工判断才停）
         id: merge
         run: |
-          incoming=$(git rev-list --count HEAD..upstream/main)
+          # 用 scripts/merge-upstream.mjs 而不是裸 `git merge`：
+          #   1) README 门面、上游自己的文档译文、上游负责的代码文件——这些冲突方向早已定死，
+          #      脚本按 scripts/merge-upstream.mjs 里的策略表自动解，不再每次人工临场判断；
+          #   2) 上游删掉我们的门面时（上游 2026-10-14 那次「重命名 + 删除」就是这么
+          #      吞掉中文 README 的），脚本把门面恢复回来；
+          #   3) 剩下真需要人判断的，脚本会开 issue——断更不再静悄悄发生。
+          set +e
+          node scripts/merge-upstream.mjs
+          merge_status=$?
+          set -e
+          report=".merge-upstream-report.json"
+          # 防御式读报告：文件缺失或损坏时 incoming 当作 0，绝不让这步因 JSON 报错而崩。
+          incoming=$(node -e "
+            try {
+              const r = JSON.parse(require('fs').readFileSync('$report','utf8'));
+              process.stdout.write(String(r.incoming ?? 0));
+            } catch { process.stdout.write('0'); }
+          ")
           echo "incoming=$incoming" >> "$GITHUB_OUTPUT"
+          if [ "$merge_status" = "2" ]; then
+            manual=$(node -e "
+              try {
+                const r = JSON.parse(require('fs').readFileSync('$report','utf8'));
+                process.stdout.write((r.needsDecision ?? []).join(' '));
+              } catch { process.stdout.write('(见日志)'); }
+            ")
+            echo "::error title=上游合并需要判断::方向已定的冲突已自动解决，这些文件需要人来判断：$manual 。脚本已开 issue；处理方式见 docs/FORK.md §12。本次不发版。"
+            exit 1
+          fi
+          if [ "$merge_status" != "0" ]; then
+            echo "::error title=上游合并失败::脚本返回 $merge_status，详见上方输出。本次不发版。"
+            exit 1
+          fi
           if [ "$incoming" = "0" ]; then
             echo "上游无新提交"
-            exit 0
-          fi
-          if ! git merge --no-edit upstream/main; then
-            git merge --abort
-            conflicted=$(git diff --name-only "$(git merge-base HEAD upstream/main)" upstream/main | tr '\n' ' ')
-            echo "::error title=上游合并冲突::与 upstream/main 冲突，可能涉及：$conflicted 。若冲突在 package.json 的 version 行，保留我们自己的序列（取较大值）即可，forkedFrom 由下面的步骤自动写。解决方式： git fetch upstream && git merge upstream/main 手工解决后推送。本次不发版。"
-            exit 1
           fi
 
       - name: 记录上游基线（forkedFrom）
@@ -93,6 +117,34 @@ jobs:
           upstream_commit=$(git rev-parse upstream/main)
           echo "上游: version=${upstream_version} commit=${upstream_commit}"
           node scripts/set-forked-from.mjs --version "$upstream_version" --commit "$upstream_commit"
+
+      - name: 重新生成 package-lock.json
+        run: |
+          # lock 文件必须重新生成，不能合并：它的 name 字段写死了包名
+          # （上游 @agegr/pi-web，我们 @pricening/pi-web），两边必然冲突，
+          # 而合并出来的 lock 哈希与我们的包名对不上，npm ci 会直接报错。
+          # package.json 已在合并阶段结构化合成（我们的身份 + 上游的依赖），
+          # 这里用 npm install 让它与 package.json 对齐。
+          npm install --package-lock-only --no-audit --no-fund
+          # 根 package 的版本号必须与 package.json 一致。
+          node -e "
+            const fs=require('fs');
+            const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
+            const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8'));
+            let changed=false;
+            if(lock.name!==pkg.name){lock.name=pkg.name;changed=true;}
+            if(lock.version!==pkg.version){lock.version=pkg.version;changed=true;}
+            const root=lock.packages?.[''];
+            if(root){
+              if(root.name!==pkg.name){root.name=pkg.name;changed=true;}
+              if(root.version!==pkg.version){root.version=pkg.version;changed=true;}
+            }
+            if(changed){fs.writeFileSync('package-lock.json',JSON.stringify(lock,null,2)+'\n');}
+            console.log('lock 与 package.json 对齐:', changed ? '已修正' : '本来就一致');
+          "
+          # 锁文件变了就提交它（发版那一步还会再提交一次 package.json 的版本号）。
+          git add package-lock.json
+          git diff --cached --quiet || git commit -m "chore(fork): regenerate package-lock.json for the merged dependencies"
 
       - name: 安装依赖
         run: npm ci
@@ -196,7 +248,10 @@ jobs:
         run: |
           version="${{ steps.version.outputs.next }}"
           # 只提交版本号：dist-pack/ 里是刚打的 tarball，绝不能进仓库。
-          git add package.json
+          # package-lock.json 也要带上：npm version 会把 lock 里的版本号一起改，
+          # 只提交 package.json 会让 lock 落后一个版本（npm ci 虽不报错，
+          # 但下次同步时这个差异又变成一次冲突）。
+          git add package.json package-lock.json
           git diff --cached --quiet || git commit -m "chore(release): v${version}"
           git tag -f "v${version}"
           # 不要用 --follow-tags：它会顺着 main 的历史把上游的几十个 tag 一起推到 fork，
