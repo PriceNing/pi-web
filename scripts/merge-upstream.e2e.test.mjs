@@ -8,10 +8,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { syncUpstream, conflictedFiles } from "../scripts/merge-upstream.mjs";
+import { syncUpstream, conflictedFiles, sealFrontDoors } from "../scripts/merge-upstream.mjs";
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -114,6 +114,46 @@ test("情形四：package.json 的冲突按字段结构化合成", () => {
   assert.equal(merged.dependencies.forkDep, "2.0.0", "我们的依赖不能丢");
 });
 
+test("情形六：门面在本地已经缺失时，从 fork-front-doors tag 取回", () => {
+  const { fork, upstream } = makeRepos();
+  // 先封存一份门面（脚本每次成功合并都会做这件事）
+  const sealed = sealFrontDoors(fork);
+  assert.equal(sealed.sealed, true, "应当封存成功");
+  // 模拟“历史上就丢了门面”：删掉它并提交
+  rmSync(join(fork, "README.zh-CN.md"));
+  git(fork, ["add", "-A"]);
+  git(fork, ["commit", "-m", "fork loses the zh door"]);
+  // 上游也删掉它 —— 这时唯一能救的来源就是 tag
+  git(upstream, ["rm", "-q", "README.zh-CN.md"]);
+  git(upstream, ["commit", "-m", "upstream drops the zh readme"]);
+  git(fork, ["fetch", "upstream", "main"]);
+  const result = syncUpstream({ cwd: fork, fetchOrigin: false });
+  assert.ok(
+    existsSync(join(fork, "README.zh-CN.md")),
+    `门面应从 tag 恢复：${result.notes.join("; ")}`,
+  );
+  assert.match(readFileSync(join(fork, "README.zh-CN.md"), "utf8"), /我们的中文门面/);
+});
+
+test("情形七：合并失败（非冲突）时工作区不留半合并状态", () => {
+  const { fork } = makeRepos();
+  // 造一个无共同祖先的上游：把 fork 的历史换掉
+  git(fork, ["checkout", "-q", "--orphan", "fresh"]);
+  rmSync(join(fork, "README.md"), { force: true });
+  writeFileSync(join(fork, "other.md"), "unrelated\n", "utf8");
+  git(fork, ["add", "-A"]);
+  git(fork, ["commit", "-m", "unrelated root"]);
+  git(fork, ["fetch", "upstream", "main"]);
+  const result = syncUpstream({ cwd: fork, fetchOrigin: false });
+  assert.equal(result.ok, false, "无共同祖先时不该当成成功");
+  assert.match(result.notes.join(" "), /合并失败/);
+  // 不该有残留的合并状态（报告文件是本地产物，不算）
+  const status = git(fork, ["status", "--porcelain"])
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.includes(".merge-upstream-report.json"));
+  assert.deepEqual(status, [], `工作区应干净: ${status.join(" | ")}`);
+});
 test("情形五：上游改名搬走门面时，门面照样恢复", () => {
   const { fork, upstream } = makeRepos();
   // 上游把 README.zh-CN.md 改名成 docs/README.zh-CN.md（旧内容）

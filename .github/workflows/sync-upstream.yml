@@ -118,6 +118,18 @@ jobs:
           echo "上游: version=${upstream_version} commit=${upstream_commit}"
           node scripts/set-forked-from.mjs --version "$upstream_version" --commit "$upstream_commit"
 
+      - name: 升级 npm（Trusted Publishing 需要 npm >= 11.5.1）
+        run: |
+          # Node 22 自带 npm 10.x，它根本没有 OIDC 逻辑，`npm publish` 只会报
+          # ENEEDAUTH，看起来像“trusted publisher 没配对”，其实是被 CLI 版本卡住。
+          #
+          # 这个步骤必须在**生成 lock 之前**：不同 npm 版本写出的 lock 字段不一样
+          # （npm 11 会写 libc，npm 10 不会），顺序反了的话每次同步都会因为
+          # lock 的字段差异产生一次无意义的提交。
+          before=$(npm --version)
+          npm install -g npm@11
+          echo "npm 版本: $before -> $(npm --version)"
+
       - name: 重新生成 package-lock.json
         run: |
           # lock 文件必须重新生成，不能合并：它的 name 字段写死了包名
@@ -190,15 +202,6 @@ jobs:
           npm version "${{ steps.version.outputs.next }}" --no-git-tag-version --allow-same-version
           npm run build
 
-      - name: 升级 npm（Trusted Publishing 需要 npm >= 11.5.1）
-        if: steps.version.outputs.skip != '1'
-        run: |
-          # Node 22 自带 npm 10.x，它根本没有 OIDC 逻辑，`npm publish` 只会报
-          # ENEEDAUTH，看起来像“trusted publisher 没配对”，其实是被 CLI 版本卡住。
-          before=$(npm --version)
-          npm install -g npm@11
-          echo "npm 版本: $before -> $(npm --version)"
-
       - name: 发布到 npm
         if: steps.version.outputs.skip != '1'
         env:
@@ -269,6 +272,15 @@ jobs:
             exit 1
           fi
           git push "$push_url" "refs/tags/v${version}:refs/tags/v${version}" --force
+          # 门面的权威副本（scripts/merge-upstream.mjs 封存）也必须推上去：
+          # 它是「上游删掉门面时能恢复」的最后一道保险，而恢复源与历史深度无关。
+          # 不推的话，新克隆的仓库（CI、别人的 fork）就没有这份副本。
+          if git rev-parse -q --verify "refs/tags/fork-front-doors" >/dev/null; then
+            git push "$push_url" "refs/tags/fork-front-doors:refs/tags/fork-front-doors" --force
+            echo "已推送门面的权威副本 tag: fork-front-doors"
+          else
+            echo "::warning title=没有门面的权威副本::本次合并没有封存 fork-front-doors tag；下次同步前先在本地跑 node scripts/merge-upstream.mjs"
+          fi
 
       - name: 创建 GitHub Release（附 tarball）
         if: steps.version.outputs.skip != '1'

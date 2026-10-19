@@ -369,11 +369,32 @@ export function syncUpstream({ cwd = ROOT, dryRun = false, fetchOrigin = true } 
   const incoming = incomingResult.ok ? Number(incomingResult.out.trim() || "0") : 0;
   if (incoming === 0) {
     notes.push("上游无新提交");
+    // 就算没有新东西可合，也封存一次门面：万一上次封存之后门面被改过，
+    // 权威副本要跟着更新，否则恢复时会拿到旧版本。
+    sealFrontDoors(cwd);
     writeReport({ resolved: [], manual: [], incoming: 0 }, cwd);
     return { incoming: 0, resolved: [], manual: [], ok: true, notes };
   }
 
   const preMergeRef = git.safe(["rev-parse", "HEAD"]).out.trim();
+
+  // 合并前先看一眼门面在不在：
+  //   - 上游若删掉（而不是改名）它，合并会直接把它删了，合并后恢复；
+  //   - 若它**在合并前就已经缺失**（历史上丢过，比如新克隆的仓库），那合并后
+  //     也不会有它可恢复——必须现在就从 fork-front-doors tag 取回。
+  const missingBefore = MUST_KEEP.filter(
+    (file) => !existsSync(join(cwd, file)) && !git.safe(["cat-file", "-e", `upstream/main:${file}`]).ok,
+  );
+  if (missingBefore.length > 0) {
+    const back = restoreMustKeep(cwd, { ref: preMergeRef, mustKeep: missingBefore });
+    if (back.length > 0) {
+      git.run(["add", "--", ...back]);
+      git.safe(["commit", "--no-edit", "-m", "chore(fork): restore the fork's README front doors"]);
+      notes.push(`合并前恢复了缺失的门面: ${back.join(", ")}`);
+    } else {
+      notes.push(`警告：门面缺失且找不到副本: ${missingBefore.join(", ")}`);
+    }
+  }
 
   const merge = git.safe(["merge", "--no-edit", "upstream/main"]);
   if (merge.ok) {
@@ -392,7 +413,19 @@ export function syncUpstream({ cwd = ROOT, dryRun = false, fetchOrigin = true } 
 
   const files = conflictedFiles(cwd);
   if (files.length === 0) {
-    notes.push("合并失败但没有冲突文件");
+    // 不是冲突，而是合并本身失败（例如 unrelated histories）——
+    // 这时工作区不能停在半合并状态。
+    const aborted = git.safe(["merge", "--abort"]);
+    if (!aborted.ok) {
+      // 没有可中止的合并（例如它根本没开始），把索引清干净。
+      git.safe(["reset", "--hard", "HEAD"]);
+    }
+    notes.push("合并失败（不是冲突）——工作区已恢复，可能的原因：历史无共同祖先、磁盘权限、index 锁");
+    const restored = restoreMustKeep(cwd, { ref: preMergeRef });
+    if (restored.length > 0) {
+      git.run(["add", "--", ...restored]);
+      notes.push(`恢复了被上游删掉的门面: ${restored.join(", ")}`);
+    }
     writeReport({ resolved: [], manual: [], incoming }, cwd);
     return { incoming, resolved: [], manual: [], ok: false, notes };
   }
