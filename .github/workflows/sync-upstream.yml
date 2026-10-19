@@ -233,6 +233,32 @@ jobs:
           echo "↩︎ 使用 NPM_TOKEN 兜底发布（绕过 2FA 的 granular token 于 2027-01 失效，届时只能靠 OIDC）"
           npm publish
 
+      - name: 确认版本真的到了 registry（npm 偶尔会静默丢弃）
+        if: steps.version.outputs.skip != '1'
+        run: |
+          # npm publish 退出码 0 **不代表**版本能被安装：它会把包放进自己的
+          # 处理队列（"Your package is being processed and may take a few minutes
+          # to become available."），而这个队列偶尔会把版本**静默丢弃**——
+          # 实测 2026-10-19 的 0.12.4：发布报成功、provenance 也写进了
+          # sigstore、GitHub Release 也建了，但 45 分钟后 registry 里仍然查不到。
+          #
+          # 所以这里必须**验证**而不是相信退出码：查不到就重发。
+          version="${{ steps.version.outputs.next }}"
+          for attempt in 1 2 3; do
+            echo "第 $attempt 次确认 $version 是否已到 registry…"
+            # dist-tags 路由比 packument 路由先可用，所以两个都查。
+            if npm view "$PKG@$version" version --registry "$REGISTRY" 2>/dev/null | grep -q "$version"; then
+              echo "✅ $version 已经在 registry 上"
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "::error title=发布未生效::$version 连续三次都查不到。npm 把它丢进了处理队列且没有放出来。请稍后在 https://www.npmjs.com/package/$PKG?activeTab=versions 确认；若确实缺失，用 gh workflow run 重新触发一次发版。"
+              exit 1
+            fi
+            echo "  还没到，等 90 秒再试（npm 的后处理队列）"
+            sleep 90
+          done
+
       - name: 打包 tarball 作为 Release 附件（内网/镜像拉不到 npm 时的兜底）
         if: steps.version.outputs.skip != '1'
         id: pack
