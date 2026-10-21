@@ -1,0 +1,421 @@
+# [pin-fork] 上游同步 + fork 发版
+#
+# 设计约束（详见 docs/FORK.md）：
+#   - main = 上游 + 本 fork 的补丁；同步方式是 merge upstream/main，不是 rebase。
+#   - 任何一步失败都不推送、不发版，避免生产机装到半成品。
+#   - 版本必须是纯 x.y.z（上游的更新检查只认这个格式），规则见 scripts/next-version.mjs。
+#   - 灰度放在安装层（生产机锁精确版本 + 先升一台 canary），不依赖 registry dist-tag，
+#     原因见下面"发布到 npm"步骤里的两条实测结论。
+
+name: Sync upstream & publish fork
+
+on:
+  schedule:
+    - cron: "30 6 * * *" # UTC 06:30 ≈ 北京 14:30
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: "上游无新提交时也强制走一次发布"
+        type: boolean
+        default: false
+      fix_dist_tag:
+        description: "只清理陈旧的 npm dist-tag（不发布）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # 推送 main 与创建 Release
+  id-token: write # npm Trusted Publishing (OIDC)
+# 注意：GITHUB_TOKEN 无法改动 .github/workflows/ 下的文件，而且
+# \`workflows\` 不是合法的 workflow permissions 键（写了会导致 workflow 解析失败）。
+# 上游同步迟早会带进 ci.yml 的改动，所以推送这一步支持用 GIT_PUSH_TOKEN(PAT) 兜底。
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-and-publish:
+    runs-on: ubuntu-latest
+    # 只允许在 main 上跑：这个 workflow 会推送 main 并发布正式包。
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 30
+    env:
+      PKG: "@pricening/pi-web"
+      REGISTRY: "https://registry.npmjs.org/"
+      UPSTREAM: "https://github.com/agegr/pi-web.git"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要完整历史与 tag 才能算版本、打 Release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0 # 与 package.json engines 一致
+          cache: npm
+
+      - name: 配置 git 身份
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 拉取上游
+        run: |
+          git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
+          # 只取 main，**不取上游 tag**（实测教训，2026-10-02）：
+          # 上游自己也打了 v0.9.2 / v0.9.3，和我们的发版 tag 同名但指向不同 commit。
+          # `git fetch --tags` 遇到同名 tag 会报 `! [rejected] ... (would clobber existing tag)`
+          # 并以退出码 1 结束，在 `bash -e` 下直接把 job 死在“拉取上游”这一步——
+          # 于是定时同步连续 8 天全部 failure，一次 merge 都没跑过。
+          # 本 workflow 从不使用上游 tag（上游基线记录在 package.json 的 forkedFrom.commit，
+          # 版本号来自 npm + package.json，发版 tag 由下面自己 push），所以干脆不导入。
+          # 写死 refspec + --no-tags 是为了连“tag 自动跟随”也关掉，避免上游再打同名 tag。
+          git fetch --no-tags --prune upstream "+refs/heads/main:refs/remotes/upstream/main"
+
+      - name: 合并上游（策略化解冲突，只有人工判断才停）
+        id: merge
+        run: |
+          # 用 scripts/merge-upstream.mjs 而不是裸 `git merge`：
+          #   1) README 门面、上游自己的文档译文、上游负责的代码文件——这些冲突方向早已定死，
+          #      脚本按 scripts/merge-upstream.mjs 里的策略表自动解，不再每次人工临场判断；
+          #   2) 上游删掉我们的门面时（上游 2026-10-14 那次「重命名 + 删除」就是这么
+          #      吞掉中文 README 的），脚本把门面恢复回来；
+          #   3) 剩下真需要人判断的，脚本会开 issue——断更不再静悄悄发生。
+          set +e
+          node scripts/merge-upstream.mjs
+          merge_status=$?
+          set -e
+          report=".merge-upstream-report.json"
+          # 防御式读报告：文件缺失或损坏时 incoming 当作 0，绝不让这步因 JSON 报错而崩。
+          incoming=$(node -e "
+            try {
+              const r = JSON.parse(require('fs').readFileSync('$report','utf8'));
+              process.stdout.write(String(r.incoming ?? 0));
+            } catch { process.stdout.write('0'); }
+          ")
+          echo "incoming=$incoming" >> "$GITHUB_OUTPUT"
+          if [ "$merge_status" = "2" ]; then
+            manual=$(node -e "
+              try {
+                const r = JSON.parse(require('fs').readFileSync('$report','utf8'));
+                process.stdout.write((r.needsDecision ?? []).join(' '));
+              } catch { process.stdout.write('(见日志)'); }
+            ")
+            echo "::error title=上游合并需要判断::方向已定的冲突已自动解决，这些文件需要人来判断：$manual 。脚本已开 issue；处理方式见 docs/FORK.md §12。本次不发版。"
+            exit 1
+          fi
+          if [ "$merge_status" != "0" ]; then
+            echo "::error title=上游合并失败::脚本返回 $merge_status，详见上方输出。本次不发版。"
+            exit 1
+          fi
+          if [ "$incoming" = "0" ]; then
+            echo "上游无新提交"
+          fi
+
+      - name: 记录上游基线（forkedFrom）
+        run: |
+          # 上游会提交代码但不 bump 自己的 version（它停在 0.9.1 时 HEAD 一直在动），
+          # 所以“对应哪个上游构建”只能靠这个字段记录，靠手写一天就过期。
+          upstream_version=$(git show upstream/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          upstream_commit=$(git rev-parse upstream/main)
+          echo "上游: version=${upstream_version} commit=${upstream_commit}"
+          node scripts/set-forked-from.mjs --version "$upstream_version" --commit "$upstream_commit"
+
+      - name: 升级 npm（Trusted Publishing 需要 npm >= 11.5.1）
+        run: |
+          # Node 22 自带 npm 10.x，它根本没有 OIDC 逻辑，`npm publish` 只会报
+          # ENEEDAUTH，看起来像“trusted publisher 没配对”，其实是被 CLI 版本卡住。
+          #
+          # 这个步骤必须在**生成 lock 之前**：不同 npm 版本写出的 lock 字段不一样
+          # （npm 11 会写 libc，npm 10 不会），顺序反了的话每次同步都会因为
+          # lock 的字段差异产生一次无意义的提交。
+          before=$(npm --version)
+          npm install -g npm@11
+          echo "npm 版本: $before -> $(npm --version)"
+
+      - name: 重新生成 package-lock.json
+        run: |
+          # lock 文件必须重新生成，不能合并：它的 name 字段写死了包名
+          # （上游 @agegr/pi-web，我们 @pricening/pi-web），两边必然冲突，
+          # 而合并出来的 lock 哈希与我们的包名对不上，npm ci 会直接报错。
+          # package.json 已在合并阶段结构化合成（我们的身份 + 上游的依赖），
+          # 这里用 npm install 让它与 package.json 对齐。
+          npm install --package-lock-only --no-audit --no-fund
+          # 根 package 的版本号必须与 package.json 一致。
+          node -e "
+            const fs=require('fs');
+            const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
+            const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8'));
+            let changed=false;
+            if(lock.name!==pkg.name){lock.name=pkg.name;changed=true;}
+            if(lock.version!==pkg.version){lock.version=pkg.version;changed=true;}
+            const root=lock.packages?.[''];
+            if(root){
+              if(root.name!==pkg.name){root.name=pkg.name;changed=true;}
+              if(root.version!==pkg.version){root.version=pkg.version;changed=true;}
+            }
+            if(changed){fs.writeFileSync('package-lock.json',JSON.stringify(lock,null,2)+'\n');}
+            console.log('lock 与 package.json 对齐:', changed ? '已修正' : '本来就一致');
+          "
+          # 锁文件变了就提交它（发版那一步还会再提交一次 package.json 的版本号）。
+          git add package-lock.json
+          git diff --cached --quiet || git commit -m "chore(fork): regenerate package-lock.json for the merged dependencies"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 质量门禁（lint / 类型 / 全量测试）
+        run: |
+          npm run lint
+          npx tsc --noEmit
+          npm test
+        # npm test 会跑 pin / archive 的锚点测试：上游若重构掉接缝，
+        # 这里会红，从而不会发出一个功能已静默失效的版本。
+
+      - name: 计算版本号
+        id: version
+        run: |
+          # 新包刚发布时，registry 的 packument 路由（npm view 走的就是它）可能仍返回
+          # 404，而 dist-tags 路由已经可用。只看 npm view 会把"已经发过版"误判成
+          # "从未发过版"，下次就会算出重复版本号并撞上 E409。所以两个来源都取，拿最大值。
+          published=$( { npm view "$PKG" version --registry "$REGISTRY" 2>/dev/null || true
+                        npm dist-tag ls "$PKG" --registry "$REGISTRY" 2>/dev/null \
+                          | awk -F': ' '/^[A-Za-z0-9_-]+: /{print $2}' || true
+                      } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 )
+          published=${published:-0.0.0}
+          # 仓库当前的版本（上次发布留下的）。它才是"有没有新东西"的判据。
+          base=$(node -p "require('./package.json').version")
+          next=$(node scripts/next-version.mjs --published "$published")
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          # 不能拿 next 和 published 比：按版本规则 next 永远大于 published（bumpPatch），
+          # 那样这个条件几乎永不成立，每天的定时任务都会发一个内容完全相同的空版本。
+          # 正确的判据是：上游没有新提交，且仓库版本已经就是已发布的那个版本。
+          if [ "${{ steps.merge.outputs.incoming }}" = "0" ] \
+             && [ "$base" = "$published" ] \
+             && [ "${{ inputs.force_publish }}" != "true" ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            echo "无上游新提交且 $base 已发布，跳过发版"
+          fi
+
+      - name: 构建
+        if: steps.version.outputs.skip != '1'
+        run: |
+          npm version "${{ steps.version.outputs.next }}" --no-git-tag-version --allow-same-version
+          npm run build
+
+      - name: 发布到 npm（并确认真的到了 registry）
+        if: steps.version.outputs.skip != '1'
+        id: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # 直接发 latest，不用 `--tag next`。两条实测结论决定了这一点：
+          #   1) 首次发布时即使加 --tag next，npm 仍会创建 latest，"next 灰度"形同虚设；
+          #   2) 把 latest 改回去需要能改 dist-tag 的凭据——普通 token 被账号 2FA 策略
+          #      挡掉（实测 403），而 Trusted Publishing (OIDC) 只能发布、不能改 tag。
+          # 灰度因此放在安装层：见 docs/FORK.md §7（生产机锁版本 + 先升一台 canary）。
+          # 发布通道：OIDC 优先（无 secret、无过期，也是 2027-01 token 禁令之后唯一可行的
+          # 路径），失败才退回 NPM_TOKEN 兜底。这样每次发布都在顺手验证 OIDC 是否配好，
+          # 同时不牺牲退路。
+          #
+          # 为什么要循环：npm publish 退出码 0 **不代表**版本能被安装。它会把包
+          # 放进自己的后处理队列（"Your package is being processed and may take a
+          # few minutes to become available."），而这个队列偶尔会把版本卡住不放
+          # ——实测 2026-10-19 的 0.12.4：发布报成功、provenance 写进了 sigstore、
+          # GitHub Release 也建了，但 45 分钟后 registry 里仍然查不到；再发一次
+          # 则得到 E409 "Cannot publish over previously staged version"。
+          #
+          # 所以：发完必须**验证**；查不到就换一个更高的版本号重发
+          # （同一个号被 staged 之后就不能再用了），最多试三次。
+          version="${{ steps.version.outputs.next }}"
+          publish_once() {
+            set +e
+            echo "::group::尝试 Trusted Publishing (OIDC) — $1"
+            npm publish --provenance
+            status=$?
+            echo "::endgroup::"
+            if [ "$status" = "0" ]; then
+              echo "✅ OIDC 发布成功（$1）"
+              return 0
+            fi
+            echo "::warning title=OIDC 发布未通过::退出码 ${status}；下面尝试 NPM_TOKEN 兜底"
+            if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+              echo "::error title=没有可用发布通道::OIDC 失败且未配置 NPM_TOKEN。请到 npm 包页面核对 Trusted Publishing：Organization or user=PriceNing、Repository=pi-web、Branch=main、Workflow filename=sync-upstream.yml，并且必须勾选 Allow npm publish"
+              return 1
+            fi
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
+            echo "↩︎ 使用 NPM_TOKEN 兜底发布（绕过 2FA 的 granular token 于 2027-01 失效，届时只能靠 OIDC）"
+            npm publish
+          }
+          published_now() {
+            npm view "$PKG@$1" version --registry "$REGISTRY" 2>/dev/null | grep -q "$1"
+          }
+          # 等待时长：实测 npm 的后处理队列最长到过 1 小时（2026-10-19 的 0.12.4
+          # 发布后约 1 小时才出现在 registry）。所以这里等得比之前长得多：
+          # 急着换号重发反而会撞上 E409——那个号其实已经发布成功了，只是还没放出来。
+          for attempt in 1 2 3; do
+            publish_once "$version" || exit 1
+            # 确认版本真的可查。dist-tags 路由比 packument 路由先可用，所以两个都查。
+            for wait in $(seq 1 20); do
+              echo "确认 $version 是否已到 registry（第 $wait 次）…"
+              if published_now "$version"; then
+                echo "✅ $version 已经在 registry 上"
+                echo "version=$version" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "  还没到，等 60 秒（npm 的后处理队列，实测最长约 1 小时）"
+              sleep 60
+            done
+            if [ "$attempt" = "3" ]; then
+              echo "::error title=发布未生效::$version 发了三次都查不到。npm 把它卡在了后处理队列里。此时不能用同一个版本号重发（会 E409），只能换一个更高的号：把 package.json 的 version 调高一级再触发发版。"
+              exit 1
+            fi
+            # 换一个更高的号重发。**先确认那个号没被占用**：
+            # 被 npm staged 过的号（发过但还没放出来）再发会 E409。
+            next=$(node scripts/next-version.mjs --published "$version")
+            while npm view "$PKG@$next" version --registry "$REGISTRY" 2>/dev/null | grep -q "$next"; do
+              echo "  $next 已被占用，继续往上找…"
+              next=$(node scripts/next-version.mjs --published "$next")
+            done
+            version="$next"
+            echo "::warning title=换版本号重发::$version 没有出现，改为 $version 重发（被 staged 的版本号不能再用）"
+            npm version "$version" --no-git-tag-version --allow-same-version
+            # 重新构建：tarball 里打包的是构建产物，版本号变了就得重建，
+            # 否则发出去的是一个“内容属于旧版本、版本号却是新的”的包。
+            npm run build
+            git add package.json package-lock.json
+            git diff --cached --quiet || git commit -m "chore(release): v${version}"
+          done
+
+      - name: 清理陈旧的 dist-tag（next）
+        # 不用 job 级 if：dispatch 的 boolean input 在那里求值不稳（实测会被跳过）。
+        # 改成在步骤内部判断 github.event.inputs（dispatch 时的原始字符串）。
+        if: always() && (steps.version.outputs.skip != '1' || github.event.inputs.fix_dist_tag == 'true')
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # 我们只发 latest，不发 next。但早年的发布给这个包留了一个
+          # `next` 标签（指向 0.9.1，2026-09-16），它早被 latest 超过，
+          # 留着只会让人装到一个月前的旧版本。
+          current_next=$(npm dist-tag ls "$PKG" --registry "$REGISTRY" 2>/dev/null | awk '/^next:/{print $2}')
+          if [ -z "$current_next" ]; then
+            echo "没有 next 标签，无需清理"
+            exit 0
+          fi
+          published_now="${{ steps.publish.outputs.version || steps.version.outputs.next }}"
+          if [ -n "$published_now" ] && [ "$current_next" = "$published_now" ]; then
+            echo "next 已经指向本次发布的版本，无需处理"
+            exit 0
+          fi
+          echo "要清理陈旧的 next 标签（指向 $current_next）"
+          # 先试 OIDC：npm 的 Trusted Publishing 授权是按 (包, workflow 文件名, 分支)
+          # 绑定的，这个 workflow 文件名在授权里，所以 dist-tag 也可能被放行。
+          # 不行再退到 NPM_TOKEN（OIDC 明确只授权 publish 时会 401）。
+          rm -f ~/.npmrc
+          if npm dist-tag rm "$PKG" next --registry "$REGISTRY" 2>/dev/null; then
+            echo "✅ 已用 OIDC 清理 next 标签"
+            exit 0
+          fi
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > ~/.npmrc
+            if npm dist-tag rm "$PKG" next --registry "$REGISTRY"; then
+              echo "✅ 已用 NPM_TOKEN 清理 next 标签"
+              exit 0
+            fi
+          fi
+          echo "::warning title=未能清理 next 标签::next 仍指向 $current_next。OIDC 不能改 dist-tag 时，需要一个能改 dist-tag 的 npm automation token（存在仓库 secrets 的 NPM_TOKEN 里）。不影响 latest。"
+
+      - name: 打包 tarball 作为 Release 附件（内网/镜像拉不到 npm 时的兜底）
+        if: steps.version.outputs.skip != '1'
+        id: pack
+        run: |
+          # npm pack 不会创建 --pack-destination 目录，必须自己 mkdir。
+          mkdir -p ./dist-pack
+          npm pack --pack-destination ./dist-pack
+          tarball=$(ls dist-pack/*.tgz | head -1)
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "pkg_name=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+
+      - name: 提交合并结果并打 tag
+        if: steps.version.outputs.skip != '1'
+        env:
+          GIT_PUSH_TOKEN: ${{ secrets.GIT_PUSH_TOKEN }}
+        run: |
+          version="${{ steps.publish.outputs.version || steps.version.outputs.next }}"
+          # 只提交版本号：dist-pack/ 里是刚打的 tarball，绝不能进仓库。
+          # package-lock.json 也要带上：npm version 会把 lock 里的版本号一起改，
+          # 只提交 package.json 会让 lock 落后一个版本（npm ci 虽不报错，
+          # 但下次同步时这个差异又变成一次冲突）。
+          git add package.json package-lock.json
+          git diff --cached --quiet || git commit -m "chore(release): v${version}"
+          git tag -f "v${version}"
+          # 不要用 --follow-tags：它会顺着 main 的历史把上游的几十个 tag 一起推到 fork，
+          # 其中指向"新增 workflow 文件"的 tag 会被 GitHub 拒收，整步失败。
+          # 只推我们自己的发布 tag。
+          push_url="origin"
+          if [ -n "${GIT_PUSH_TOKEN:-}" ]; then
+            # 带 PAT 时用 https+token 直推，这样即使本次合并改到了
+            # .github/workflows/ 里的文件（GITHUB_TOKEN 不允许）也不会卡住。
+            git remote set-url origin               "https://x-access-token:${GIT_PUSH_TOKEN}@github.com/PriceNing/pi-web.git"
+            echo "使用 GIT_PUSH_TOKEN(PAT) 推送"
+          fi
+          if ! git push "$push_url" "HEAD:refs/heads/main"; then
+            echo "::error title=推送 main 失败::多半是本次合并改到了 .github/workflows/ 下的文件（GITHUB_TOKEN 无权修改）。两种解法：(1) 在仓库 secrets 里加 GIT_PUSH_TOKEN（fine-grained PAT，contents:Read&Write）；(2) 本地 git push origin main。本次 npm 包已发布成功，只是 git 侧未同步。"
+            exit 1
+          fi
+          git push "$push_url" "refs/tags/v${version}:refs/tags/v${version}" --force
+          # 门面的权威副本（scripts/merge-upstream.mjs 封存）也必须推上去：
+          # 它是「上游删掉门面时能恢复」的最后一道保险，而恢复源与历史深度无关。
+          # 不推的话，新克隆的仓库（CI、别人的 fork）就没有这份副本。
+          if git rev-parse -q --verify "refs/tags/fork-front-doors" >/dev/null; then
+            git push "$push_url" "refs/tags/fork-front-doors:refs/tags/fork-front-doors" --force
+            echo "已推送门面的权威副本 tag: fork-front-doors"
+          else
+            echo "::warning title=没有门面的权威副本::本次合并没有封存 fork-front-doors tag；下次同步前先在本地跑 node scripts/merge-upstream.mjs"
+          fi
+
+      - name: 创建 GitHub Release（附 tarball）
+        if: steps.version.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.publish.outputs.version || steps.version.outputs.next }}"
+          pkg_name="${{ steps.pack.outputs.pkg_name }}"
+          base=$(node -p "require('./package.json').forkedFrom.version")
+          notes=$(git log --pretty=format:'- %s' -20 "v${version}" | head -40)
+          {
+            echo "上游基线：v${base}"
+            echo
+            echo "## 安装"
+            echo '```'
+            echo "npm i -g ${PKG}@${version} --registry=${REGISTRY}"
+            echo '```'
+            echo
+            echo "离线兜底：下载本页附件 \`${pkg_name}\`，执行 \`npm i -g ./${pkg_name}\`"
+            echo
+            echo "## 升级策略"
+            echo "先升一台 canary 验证，再改部署脚本里的 PINNED_VERSION（生产机锁精确版本）。"
+            echo
+            echo "## 本版本包含的提交"
+            echo "${notes}"
+          } > release-notes.md
+          # 必须显式 --repo：CI 里加了 upstream remote 之后，gh 会把仓库推断成
+          # agegr/pi-web，然后抱怨“tag 存在但没推到 agegr/pi-web”而拒绝建 Release。
+          gh release create "v${version}" --repo PriceNing/pi-web \
+            --title "v${version}" --notes-file release-notes.md \
+            "${{ steps.pack.outputs.tarball }}"
+
+      - name: 结果摘要
+        run: |
+          {
+            echo "## Fork 同步结果"
+            echo "- 上游新提交：${{ steps.merge.outputs.incoming }}"
+            echo "- 已发布最高版本：${{ steps.version.outputs.published }}"
+            echo "- 仓库当前版本：${{ steps.version.outputs.base }}"
+            echo "- 本次版本：${{ steps.publish.outputs.version || steps.version.outputs.next }}"
+            echo "- 跳过发布：${{ steps.version.outputs.skip || '0' }}"
+            echo "- 升级方式：先升一台 canary（\`npm i -g ${PKG}@${{ steps.publish.outputs.version || steps.version.outputs.next }}\`），验证后再改部署脚本里的 PINNED_VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"

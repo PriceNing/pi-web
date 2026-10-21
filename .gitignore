@@ -1,0 +1,58 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/test-results/
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+/.agents/
+/skills-lock.json
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+.factory
+e2e_*.mjs
+
+# [pin-fork] 私有部署清单永不入库（本仓库是公开的）
+*.local.md
+*.local.json
+deploy/
+
+# Windows 上部分测试会把带盘符的临时路径压扁成文件名写在仓库根，不是产物。
+# ? 同时覆盖普通冒号与全角冒号两种写法。
+/C?UsersAdministratorAppDataLocalTemp*
+
+# [fork] 合并脚本的本地报告（每次同步覆盖，不进仓库）
+.merge-upstream-report.json
