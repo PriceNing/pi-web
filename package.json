@@ -17,7 +17,7 @@
   "forkedFrom": {
     "name": "@agegr/pi-web",
     "version": "0.12.2",
-    "commit": "e533d9b3975f8a74b378d5007c92fdf4d15d3fba",
+    "commit": "02eee056b35a49bbbd3bf78b6aa77c9e228ba1ed",
     "url": "https://github.com/agegr/pi-web"
   },
   "license": "MIT",
