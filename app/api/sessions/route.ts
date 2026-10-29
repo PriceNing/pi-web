@@ -12,11 +12,8 @@ import {
   getCompletionNotificationSuppressedRpcSessionIds,
   getRpcSessionInfos,
   getRunningRpcSessionIds,
+  withSubagentDisplayStatus,
 } from "@/lib/rpc-manager";
-// [pin-fork] Housekeeping only: pins for deleted sessions/projects are dropped.
-import { prunePins } from "@/lib/pin-store";
-import { pruneArchives } from "@/lib/archive-store";
-import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { startServerPerf } from "@/lib/perf";
 
 export const dynamic = "force-dynamic";
@@ -40,15 +37,7 @@ export async function GET(req: Request) {
       attachSessionProjectInfo(getRpcSessionInfos()),
     ]);
     perf?.span("scan+projects");
-    const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
-    // [pin-fork] Never throws, and only writes when something is actually stale.
-    const projectKeys = sessions.map((session) => workspaceKeyOf(session));
-    await prunePins({
-      sessionIds: sessions.map((session) => session.id),
-      projectKeys,
-    });
-    // [archive-fork] Drop archive rows whose project no longer has sessions.
-    await pruneArchives({ projectKeys });
+    const sessions = withSubagentDisplayStatus(mergeSessionLists(persistedSessions, runtimeSessions));
     return perf?.attach(jsonResponse(
       req,
       {
