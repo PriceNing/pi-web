@@ -165,6 +165,70 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 **教训**：一个"迁移器"如果只有测试调它，就等于没有迁移器。写完迁移器必须同时写它的调用点，
 否则"升级后数据还在"只是看起来成立。
 
+#### 旧存储的真实格式（写迁移数据时别写错）
+
+旧 store 的每个条目是**对象**，时间戳在 `pinnedAt` / `archivedAt` 字段里：
+
+```json
+{
+  "version": 1,
+  "sessions": { "<session-id>": { "pinnedAt": "2026-10-01T10:00:00.000Z" } },
+  "projects": { "<projectKey>": { "pinnedAt": "2026-10-01T10:00:00.000Z" } }
+}
+```
+
+写成裸字符串（`"<session-id>": "2026-10-01T10:00:00.000Z"`）会让导入器把每一项都当
+"unparsable timestamp" 跳过 —— **导入会「成功」但一条都没进去**，而且日志里只有警告。
+看到这个警告就说明格式错了。
+
+#### 迁移语义：项目归档会展开成族级
+
+旧存储里归档的是**项目**（`projectKey`），统一 state 里归档的是**会话族根**。所以一次项目归档
+会展开成该族所有根会话各带一个 `archivedAt`（同族兄弟折叠到最早的时间戳）。这是有意的语义
+位移：上游的归档本来就是族级的。
+
+项目置顶则是**一条**（`projects[key].pinnedAt`），并且它的时间戳是**迁移时刻** —— 旧存储里
+项目置顶本来就没有独立的时间可用。
+
+#### 怎么真实验证一次迁移（2026-10-29 实测过）
+
+单元测试用注入的假会话，不碰真实目录。要在真机上验一遍，用**隔离的 agent 目录**起一个
+独立实例，绝不动生产实例：
+
+```bash
+# 1) 造一个隔离的 agent 目录，复制真实会话（导入器要靠真实会话算族与 projectKey）
+TEST=/tmp/pi-web-migrate-test
+mkdir -p \$TEST/agent/pi-web
+cp -a ~/.pi/agent/sessions \$TEST/agent/sessions
+
+# 2) 写旧存储（格式见上）
+cat > \$TEST/agent/pi-web/pins.json <<'JSON'
+{ "version": 1,
+  "sessions": { "<真实 session id>": { "pinnedAt": "2026-10-01T10:00:00.000Z" } },
+  "projects": { "<真实 projectKey>": { "pinnedAt": "2026-10-01T10:00:00.000Z" } } }
+JSON
+cat > \$TEST/agent/pi-web/archives.json <<'JSON'
+{ "version": 1,
+  "projects": { "<真实 projectKey>": { "archivedAt": "2026-10-01T10:00:00.000Z" } } }
+JSON
+
+# 3) 起独立实例（不同端口 + 独立 agent 目录），然后访问会触发导入的路由
+PI_CODING_AGENT_DIR=\$TEST/agent PORT=30198 HOSTNAME=127.0.0.1 node bin/pi-web.js &
+curl -s http://127.0.0.1:30198/api/archives
+
+# 4) 验收
+cat \$TEST/agent/pi-web-session-state.json     # 置顶/归档都在里面了
+ls \$TEST/agent/pi-web/                        # 源文件已改名 *.migrated-<UTC>
+grep 'ui-state' <日志>                        # 「已把旧置顶/归档导入统一状态（N 项）」
+```
+
+要额外确认**幂等**：再访问几次（不该再导入），以及**重启进程后再访问**（新进程的
+`attempted` 标志是空的，但导入器自己的守卫是「目标存在就不写」，所以依然跳过）。
+这一条最关键 —— 守卫不能建立在进程内存里。
+
+注意：npm 发布的是**构建产物**，没有 `lib/`、`app/` 源码。所以要验源码里的改动，
+得从 GitHub 拉源码在 Linux 上 `npm ci && npm run build`（约 2 分钟）。
+
 ### 2.3 更新检查重定向
 
 上游的 `app-update` 检查写死在 `@agegr/pi-web`。若不改，界面会提示"升级到官方最新版"，**用户一点就把补丁升没了**。现在指向 `@pricening/pi-web` 与 `PriceNing/pi-web` 的 Release 页。
