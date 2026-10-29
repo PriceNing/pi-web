@@ -77,18 +77,16 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 
 | 文件 | 职责 |
 |---|---|
-| `lib/pin-order.ts` | 无依赖纯逻辑：payload 解析、`comparePinnedFirst`、key 校验、prune。浏览器与 Node 共用 |
-| `lib/pin-store.ts` | 服务端存储：读写 `~/.pi/agent/pi-web/pins.json`，`proper-lockfile` 加锁 + 原子写 + 指纹缓存 |
-| `app/api/pins/route.ts` | `GET` 读、`POST` 切换（鉴权由 `proxy.ts` 的 `/api/:path*` matcher 自动覆盖） |
-| `lib/archive-order.ts` / `lib/archive-store.ts` | 项目归档视图：key = 服务端 `projectKey`，**不移动会话文件** |
-| `app/api/archives/route.ts` | 归档 / 取消归档 |
+| `lib/pin-order.ts` | 无依赖纯逻辑：payload 解析、`comparePinnedFirst`、key 校验。浏览器与 Node 共用（**只保留排序比较器**） |
+| `lib/archive-order.ts` | 项目归档视图的 key 校验（**不移动会话文件**） |
+| `app/api/archives/route.ts` | 归档 / 取消归档（**只读聚合**：从统一 UI state 读） |
 | `app/api/archives/sessions/route.ts` | 设置页里按项目批量删除会话（复用 `deleteSessionById`；运行中 409） |
-| `hooks/useArchives.ts`、`components/ArchiveButton.tsx`、`components/ArchivesConfig.tsx` | 侧栏归档按钮 + 设置里的归档管理页 |
-| `lib/session-delete.ts` | 从会话 DELETE 路由抽出的删除实现，供批量删除复用 |
-| `hooks/usePins.ts` | 客户端状态：挂载时拉一次，之后采纳轮询捎带的 payload；乐观更新 + 失败回滚 |
-| `components/PinButton.tsx` | 图钉按钮，`action` / `inline` 两种形态 |
-| `lib/pin-order.test.mjs`、`lib/pin-store.test.mjs`、`lib/pin-fork-anchors.test.mjs`、`lib/pin-fork-seams.test.mjs` | pin 的纯逻辑 / 存储 / **锚点** / 排序接缝测试 |
-| `lib/archive-order.test.mjs`、`lib/archive-store.test.mjs`、`lib/archive-fork-anchors.test.mjs`、`lib/archive-fork-seams.test.mjs` | 归档的纯逻辑 / 存储 / **锚点** / 过滤接缝测试 |
+| `components/ArchivesConfig.tsx` | 设置里的归档管理页 |
+| `lib/session-delete-compat.ts` | `deleteSessionById` 兼容包装（上游 `lib/session-delete.ts` 的薄封装） |
+| `lib/ui-state-migrate.ts`（+测试） | **一次性**导入：把旧存储（`pins.json` / `archives.json`）导入统一 UI state |
+| `lib/ui-state-migrate-once.ts` | 把导入器接到产品路径上（幂等：统一 state 已存在就跳过） |
+| `lib/pin-order.test.mjs`、`lib/pin-fork-anchors.test.mjs`、`lib/pin-fork-seams.test.mjs` | pin 的纯逻辑 / **锚点** / 排序接缝测试 |
+| `lib/archive-order.test.mjs`、`lib/archive-fork-anchors.test.mjs`、`lib/archive-fork-seams.test.mjs` | 归档的纯逻辑 / **锚点** / 过滤接缝测试 |
 | `scripts/next-version.mjs`（+测试） | 版本号规则的唯一实现（见 §4） |
 | `scripts/set-forked-from.mjs`（+测试） | 维护 `package.json.forkedFrom`，记录对应哪个上游构建（见 §5.2） |
 | `scripts/deploy-pi-web.mjs` | 生产机 status / install / rollback，强制精确版本 + 显式 registry（见 §7.1） |
@@ -103,11 +101,10 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 
 | 文件 | 上游改动频率 | 我们改了什么 |
 |---|---|---|
-| `components/SessionSidebar.tsx` | 高（48 次/90 天） | pin 接线 + 归档接线（`useArchives`、项目行归档按钮、轮询采纳 archives） |
+| `components/SessionSidebar.tsx` | 高（48 次/90 天） | pin 接线（从上游统一 UI state 派生置顶集合，喂给排序接缝） |
 | `lib/session-family.ts` | 极低（1 次） | 可选参数 `pinnedSessionIds` + 排序改为 pinned 优先 |
 | `lib/project-groups.ts` | 极低（1 次） | 可选参数 `pinnedProjectKeys` + `archivedProjectKeys` 过滤 |
-| `app/api/agent/running/route.ts` | 低（3 次） | 响应里捎带 `pins` 与 `archives` |
-| `app/api/sessions/route.ts` | 低（5 次） | 列表加载时 `prunePins()` / `pruneArchives()` 清理孤儿 |
+| `app/api/agent/running/route.ts` | 低（3 次） | 响应里捎带统一 UI state 的 `sessionUiStateRevision` |
 | `lib/app-update.ts`、`app/api/app-update/route.ts` | 极低（1、2 次） | 更新检查指向我们的包（见 §2.2） |
 | `components/SessionSidebar.test.mjs` | 中（13 次） | 上游一条断言按新签名更新 |
 | `lib/app-update.test.mjs` | 低 | 上游一条断言按新 Release URL 更新 |
@@ -121,8 +118,11 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 - 项目 pin 的 key 用服务端算出的 `projectKey`（`workspaceKeyOf()`），**不用路径字符串**——Windows 大小写、分隔符、UNC 已由上游归一化。
 - 会话 pin 的 key 是 `session.id`：改名保留、**fork 不继承**、删除即清理。
 - 项目下已无会话时，其 pin 自动清理（与上游"项目列表只含有会话的目录"的立场一致）。
-- 图钉与相邻的重命名/删除按钮**同一套视觉规格与出现规则**：桌面端在 hover 时随该组一起出现，**已置顶的行则常亮**作为标记；触屏设备（`useIsMobile()`）始终可见，因为没有 hover 就永远点不到。
-- 跨设备同步**不开新连接**：蹭侧栏已有的 2.5 秒 `GET /api/agent/running` 轮询（`RUNNING_SESSIONS_POLL_MS = 2500`），所以任何一端 pin，其他端 ≤2.5 秒收敛。**限定条件**：该轮询只在标签页可见时进行（`document.visibilityState !== "visible"` 时暂停），所以被切到后台的标签页会在重新获得可见时收敛，而不是准时 2.5 秒。
+- 置顶与归档的**存储**是上游 v0.11.0 引入的统一 UI state（`~/.pi/agent/pi-web-session-state.json`），
+  本 fork 不再另建存储（旧的 `pins.json` / `archives.json` 已退役，见 §2.4）。
+- 跨设备同步**不开新连接**：蹭侧栏已有的 2.5 秒 `GET /api/agent/running` 轮询（`RUNNING_SESSIONS_POLL_MS = 2500`），
+  轮询捎带统一 UI state 的 `revision`，**revision 变了才去拉全量**。所以任何一端 pin，其他端 ≤2.5 秒收敛。
+  **限定条件**：该轮询只在标签页可见时进行（`document.visibilityState !== "visible"` 时暂停），所以被切到后台的标签页会在重新获得可见时收敛，而不是准时 2.5 秒。
 
 ### 2.2 项目归档（视图开关，不移动会话文件）
 
@@ -130,12 +130,40 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 
 **行为规定**
 
-- 归档记录的 key 是服务端 `projectKey`，落在 `~/.pi/agent/pi-web/archives.json`。会话 `.jsonl` **原地不动**。
-- 侧栏项目下拉过滤掉已归档项目；归档按钮在项目行上（与图钉并列）。删除会话**只在设置 → 归档**，侧栏没有删除项目。
+- 归档记录的 key 是服务端 `projectKey`，存在统一 UI state 里。会话 `.jsonl` **原地不动**。
+- 侧栏项目下拉过滤掉已归档项目。删除会话**只在设置 → 归档**，侧栏没有删除项目。
 - 设置里的归档节是全局页（不依赖当前 cwd）。详情列出该项目下的会话标题 / 时间 / 消息数。
-- 删除这批会话：复用 `deleteSessionById`；该项目有正在运行的 agent 则 409；确认词为 `confirm` / 「确认」 / 「確認」。全部成功后才摘掉该项目的 pin 与归档记录。不删磁盘上的代码目录。
-- 在已归档项目里新建会话、从搜索打开其会话、或用自定义路径进入，都会自动取消归档。
-- 跨设备同样蹭 `/api/agent/running` 的 `archives` 字段。
+- 删除这批会话：复用上游的 `deleteSessions`（经 `lib/session-delete-compat.ts` 包装）；该项目有正在运行的
+  agent 则 409；确认词为 `confirm` / 「确认」 / 「確認」。**不删磁盘上的代码目录**。
+- 归档标记落在**会话族**的根行上（不是单个会话），所以归档一个项目等于它整族都归档。
+- 上游 v0.11.0 起，统一 UI state 是唯一的真相源；上游的 `deleteSessions` 自己会
+  `forgetSessionUiState`，所以删除后置顶与归档标记一并清掉，**不需要额外清理**。
+
+### 2.4 旧存储的退役（2026-10-29）
+
+上游 v0.11.0 把置顶/归档/项目顺序收进一份统一 UI state 后，本 fork 早于那版的两份旧文件
+（`~/.pi/agent/pi-web/pins.json`、`archives.json`）就成了**没人读的第二套存储**。当时还留着
+三处会往旧存储写的活代码：
+
+- `app/api/pins/route.ts` —— 置顶开关写旧存储，侧栏读统一 state，**两边不同步**；
+- `app/api/archives/sessions/route.ts` 的批量删除成功后清理旧存储，**统一 state 里的归档标记没清**；
+- `app/api/sessions/route.ts` 里的 `prunePins()` / `pruneArchives()` —— 定期 prune 没人读的文件。
+
+更要紧的是：**导入器 `lib/ui-state-migrate.ts` 当时没有任何产品调用点**，只有测试调它。
+也就是说一台从 v0.11.0 之前升上来的机器，会**静默丢掉全部置顶和全部归档项目**。
+
+现状（2026-10-29 一次性改完）：
+
+- 旧存储、它们专属的路由 / hook / 行内按钮，全部**删除**（`lib/pin-store.ts`、
+  `lib/archive-store.ts`、`app/api/pins/route.ts`、`hooks/usePins.ts`、`hooks/useArchives.ts`、
+  `components/PinButton.tsx`、`components/ArchiveButton.tsx`）；
+- `app/api/sessions/route.ts` 因此**与上游逐字一致**（我们那侧只剩 prune 死代码）；
+- 导入器接到 `GET /api/archives`（fork 自有路由）上。它只在统一 state **不存在**时执行，
+  迁移过的机器只付一次 stat；导入失败不抛，不会拖垮读取置顶/归档的请求；
+- 导入成功后源文件改名保留（`*.migrated-<UTC>`）作审计痕迹；目标已存在则拒写。
+
+**教训**：一个"迁移器"如果只有测试调它，就等于没有迁移器。写完迁移器必须同时写它的调用点，
+否则"升级后数据还在"只是看起来成立。
 
 ### 2.3 更新检查重定向
 
@@ -165,7 +193,7 @@ git push -u origin feat/<名字>       # 开 PR，让 CI 在 ubuntu 上跑一遍
 | 顺序 | 做法 | 理由 |
 |---|---|---|
 | 1 | 新逻辑一律开**新文件**，绝不往大组件里塞 | 永不冲突 |
-| 2 | 需要服务端状态 → 写 `~/.pi/agent/pi-web/<名字>.json`，照抄 `lib/pin-store.ts`（`proper-lockfile` 加锁 + 原子写 + 指纹缓存） | 与 pi 共享目录同生命周期，备份/迁移一起走 |
+| 2 | 需要服务端状态 → 写 `~/.pi/agent/pi-web/<名字>.json`，**照抄上游 `lib/session-ui-state.ts` 的写法**（`proper-lockfile` 加锁 + 原子写 + 指纹缓存） | 与 pi 共享目录同生命周期，备份/迁移一起走 |
 | 3 | 需要改行为 → 挂在**冷文件**的接缝上。近 90 天提交次数：`lib/session-family.ts` 1、`lib/project-groups.ts` 1、`lib/app-update.ts` 1、`app/api/agent/running/route.ts` 3、`app/api/sessions/route.ts` 5 | 冲突概率极低 |
 | 4 | 实在要动**热文件** → 只允许"接线"级改动，每处加 `// [<功能>-fork]` 标记 | 把冲突面压到几十行内 |
 | 5 | **绝不触碰**（见下表） | — |
@@ -240,6 +268,11 @@ Tag 约定：
 
 ### 5.1 发布通道：OIDC（当前状态 —— 仓库内**没有任何 secret**）
 
+> ⚠️ **2026-10-29 实测：GitHub 停用了本仓库的 Actions**，于是**发版通道也一并断了**。
+> 症状与排查见 §7.8。恢复办法只有一条：在账号网页上重新启用 Actions（API 改不动）。
+> 停用期间可以把上游合并到本地并验证，但**发不了版** —— OIDC 是唯一的 publish 通道，
+> 本地 token 只有读权限。
+
 已实测确认（v0.9.6）：在 `gh secret list` 为空的情况下，CI 仍成功发出
 `+ @pricening/pi-web@0.9.6`，且走的是 `尝试 Trusted Publishing (OIDC)` 分支。
 即：无 token、不会过期、附带 provenance 证明，也不受 npm「2027-01 起绕过 2FA 的
@@ -276,6 +309,9 @@ Trusted Publishing 要在**包页面**上配置，而包页面只有发布过一
 > - **不勾 bypass 的 token 发不了**：`403 ... bypass 2fa enabled is required to publish packages`；
 >   同理 web login 的 CLI token 也改不了 dist-tag（实测 403）。副作用：stale 的 `next: 0.9.1`
 >   tag 现在删不掉，只能忽略（没人会装 `@next`，且 0.9.1 也是合法构建）。
+>   补充（2026-10-29 实测）：本机 `~/.npmrc` 里那个 token 对 npmjs.com **只能读**
+>   —— `npm owner ls` 正常，但 `npm dist-tag rm` 返回 `E401 Unauthorized`。
+>   所以**本地既不能发版也不能改 dist-tag**，两者都只在 CI 里做。
 > - **Node 22 自带的 npm 10.x 没有 OIDC 代码路径**，`npm publish --provenance` 只会报 `ENEEDAUTH`，
 >   现象和「trusted publisher 没配对」完全一样。workflow 已固定先 `npm install -g npm@11` 并打印版本。
 
@@ -581,9 +617,9 @@ node --experimental-strip-types --test-force-exit --test \
 ### 7.4 切换后的自检
 
 ```powershell
-# 服务是否活着、pin 接口是否存在（旧版官方版没有这个路由，可用来确认切换成功）
-(Invoke-WebRequest http://127.0.0.1:30141/api/pins -UseBasicParsing).Content
-# 期望：{"sessions":[],"projects":[]}
+# 服务是否活着、fork 独有路由是否存在（官方包没有这个路由，可用来确认切换成功）
+(Invoke-WebRequest http://127.0.0.1:30141/api/archives -UseBasicParsing).Content
+# 期望：{"projects":[]}
 ```
 
 规定：
@@ -592,7 +628,7 @@ node --experimental-strip-types --test-force-exit --test \
   `deploy-pi-web.mjs install` 会直接拒收非 `x.y.z` 的参数，launcher 用 `PI_WEB_PIN` 表达同一约束。
 - 同一台机器**只保留一个** pi-web 包（原因见 §7.1）。
 - 升级前先停服务：`pi-web` 会 idle 回收 AgentSession，但 `node-pty` 终端会话会断。
-- 数据安全：卸载/升级**不会动 `~/.pi/agent/`**，会话、配置以及 `pi-web/pins.json`（置顶记录）都完整保留，本地 pi CLI 不受影响。
+- 数据安全：卸载/升级**不会动 `~/.pi/agent/`**，会话、配置以及统一 UI state（`pi-web-session-state.json`，置顶/归档/项目顺序）都完整保留，本地 pi CLI 不受影响。
 - `PI_WEB_SKIP_VERSION_CHECK=1` 现在**不再是必须**（更新检查已指向我们自己的包），但如果你不希望界面出现任何升级提示，它仍是有效的开关。
 
 ### 7.5 一键接入新的生产机：`scripts/bootstrap-production.ps1`
@@ -628,7 +664,7 @@ readlink -f ~/.npm-global/bin/pi-web          # 应指向 @pricening/pi-web/bin/
 
 # 2) 重启服务并确认是 fork
 systemctl --user restart pi-web
-curl -s http://127.0.0.1:30141/api/pins       # 返回 JSON 才是 fork；404 说明还是官方包
+curl -s http://127.0.0.1:30141/api/archives      # 返回 JSON 才是 fork；404 说明还是官方包
 
 # 3) 才卸官方包
 npm uninstall -g @agegr/pi-web
@@ -645,17 +681,16 @@ systemctl --user restart pi-web && systemctl --user is-active pi-web   # 卸完�
   `npm i -g @pricening/pi-web@<版本> && systemctl --user restart pi-web`。这等价于 Windows 侧
   `PI_WEB_PIN` 的效果，无需额外配置。
 - `ExecStart` 指向 npm 全局 bin 的**链接**而非包内绝对路径，这样升级/重装不用改 unit。
-- 快速判断"服务的是哪个构建"：`curl -s http://127.0.0.1:30141/api/pins` —— 官方包没有这个路由，
+- 快速判断"服务的是哪个构建"：`curl -s http://127.0.0.1:30141/api/archives` —— 官方包没有这个路由，
   会返回 Next 的 404 HTML。
 
-### 7.7 运维归档误伤 `~/.pi`（2026-10-20 在 202 上实际发生）
+### 7.7 运维归档误伤 `~/.pi`（一次真实事故的通用写法）
 
-202 的 `~/.pi`（19 个会话、auth.json、models.json、pi-web-session-state.json）被一次
-「运维归档」搬进了 `/home/nrc/ops-archive-202610/misc/.pi`——那个目录是别的项目
-（llama.cpp、open-webui 等）的杂物堆。后果：
+某台 Linux 生产机的 `~/.pi`（会话文件、`auth.json`、`models.json`、统一 UI state）被一次
+「运维归档」搬进了另一个项目的杂物目录。后果：
 
 - pi-web 的 **unit 文件和安装目录也一起没了**（`~/.config/systemd/user/pi-web.service`、
-  `~/.npm-global/`）；
+  自定义 npm 安装前缀目录）；
 - systemd 内存里还留着旧定义，所以**服务进程照常跑、端口照常听、端点照常返回 200**，
   但 `~/.pi` 没了 → 它读到的是**空数据**（`/api/sessions` 返回 `sessions: []`）；
 - `systemctl --user status` 会显示 unit 标记为 `bad`、并警告
@@ -664,20 +699,20 @@ systemctl --user restart pi-web && systemctl --user is-active pi-web   # 卸完�
 **教训：服务活着 ≠ 服务正常。** 判断一台机器上的 pi-web 是否真的健康，要看**数据**：
 
 ```bash
-curl -s http://127.0.0.1:30141/api/sessions | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["sessions"]))'
+curl -s http://127.0.0.1:<端口>/api/sessions | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["sessions"]))'
 # 0 = 服务在空数据上跑（多半是 ~/.pi 没了或搬走了）
 systemctl --user status pi-web | grep -i "changed on disk"   # 有这行 = unit 文件在磁盘上已不存在
 ```
 
-修复顺序（202 上已实测走通）：
+修复顺序（已实测走通）：
 
 ```bash
 # 1) 把数据搬回来（**复制**，保留归档原件当备份）
-cp -a /home/nrc/ops-archive-202610/misc/.pi /home/nrc/.pi
+cp -a <归档目录>/.pi ~/.pi
 find ~/.pi/agent/sessions -name '*.jsonl' | wc -l        # 确认会话回来了
 
 # 2) 重装（精确版本）
-npm install -g --prefix ~/.npm-global @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
+npm install -g --prefix <安装前缀> @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 
 # 3) 重建 unit（模板：scripts/pi-web.service）
 mkdir -p ~/.config/systemd/user && cp <仓库>/scripts/pi-web.service ~/.config/systemd/user/
@@ -685,12 +720,55 @@ systemctl --user daemon-reload
 
 # 4) 重启并验收
 systemctl --user restart pi-web
-curl -s http://127.0.0.1:30141/api/sessions | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["sessions"]))'
+curl -s http://127.0.0.1:<端口>/api/sessions | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["sessions"]))'
 systemctl --user enable pi-web      # 补上开机自启（重建 unit 后会丢）
 ```
 
 `~/.pi` 里没有 `PI_CODING_AGENT_DIR` 覆盖时，pi-web 读的就是 `~/.pi/agent`；
 所以 **`~/.pi` 一旦被搬走，pi-web 会静默地变成一个空壳**。
+
+> 这条纪律反过来也适用：**任何会批量移动 `~` 下目录的运维脚本，先 dry-run 看清它要动什么。**
+
+---
+
+### 7.8 Actions 被停用时，定时同步会静默停摆（2026-10-29 实测）
+
+GitHub 可以**停用整个仓库的 Actions**。停用后的症状很容易误判：
+
+| 现象 | 说明 |
+| --- | --- |
+| 定时同步不再产生新运行 | `schedule` 事件不再被调度，仓库里几天没动静 |
+| `gh workflow run` 报 422 | `Actions has been disabled for this repository` |
+| 但 `gh api .../actions/workflows` 仍然显示 `active` | workflow 自身状态与**仓库/账号级 Actions 开关**是两回事 |
+| `gh api .../actions/permissions` 仍返回 `enabled: true` | 那是**仓库级**开关；422 来自**账号级**停用，API 改不动 |
+
+**怎么区分「同步失败」和「同步没被触发」**：看 `actions/runs` 里 `event=schedule` 的最新
+`created_at`。如果连 run 都没有，就不是脚本或冲突的问题，而是**根本没被调度**。
+
+排查顺序：
+
+```bash
+# 1) 最近有没有被调度？（没有 run = 没被触发，不是失败）
+gh api "repos/<owner>/<repo>/actions/workflows/sync-upstream.yml/runs?per_page=10" \
+  --jq '.workflow_runs[] | "\(.created_at)  \(.event)  \(.conclusion)"'
+
+# 2) 仓库级开关（能改，但往往不是它）
+gh api "repos/<owner>/<repo>/actions/permissions"
+
+# 3) 手动触发试试（422 = 账号级停用）
+gh api --method POST "repos/<owner>/<repo>/actions/workflows/sync-upstream.yml/dispatches" -f ref=main
+```
+
+账号级停用**没有 API 可绕**（`PUT .../actions/permissions` 不管用），只能在网页上恢复：
+账号 Settings → Billing & licensing → Usage，或仓库 Settings → Actions → 启用。
+
+**停用期间发版也会停**：CI 的 OIDC 是唯一的 publish 通道（§5.1、§9），本地 token 只有读
+权限，所以 Actions 停了 = 发不了版。此时只能先把上游合并到本地并验证，等 Actions 恢复后
+再触发一次发版（§6.3）。
+
+**预防**：给同步加一条「预期没变才跳过」的护栏 —— 上游长期不动时，静默停摆和
+「上游没更新」长得一模一样。定期（哪怕手动）看一眼最近一次 schedule run 的时间戳。
+
 
 ---
 
@@ -700,7 +778,7 @@ pi-web 的优秀设计是**与本地 pi 共享 `~/.pi/agent`**。我们绝不破
 
 | 允许 | 禁止 |
 |---|---|
-| 在 `getAgentDir()/pi-web/` 子目录下写自有状态（先例：上游自己的 `pi-web-session-index.json`；本 fork 另有 `pins.json`、`archives.json`） | 写 `settings.json`、`auth.json`、`models.json`（这些归 pi CLI 所有，两边写会互相覆盖） |
+| 在 `getAgentDir()/pi-web/` 子目录下写自有状态（先例：上游自己的 `pi-web-session-index.json`、`pi-web-session-state.json`） | 写 `settings.json`、`auth.json`、`models.json`（这些归 pi CLI 所有，两边写会互相覆盖） |
 | 只读 `sessions/` 下的会话 | 修改任何会话 `.jsonl` 内容或元数据 |
 | 用 `getAgentDir()` 取路径，从而跟随 `PI_CODING_AGENT_DIR` 一起迁移 | 写死 `~/.pi/agent` |
 | 附加纯展示性元数据（pin / archive） | 伪造 `modified` 等真实时间字段来骗排序 |
@@ -791,8 +869,8 @@ Windows 本机跑 `npm test` 已不再是“只差 2 个”：上游 v0.10.0 那
 
 1. `npx tsc --noEmit` 与 `npm run lint` **必须 0 输出**；
 2. **fork 测试必须全绿**：`node --test lib/pin-fork-anchors.test.mjs lib/pin-fork-seams.test.mjs
-   lib/archive-fork-anchors.test.mjs lib/archive-fork-seams.test.mjs lib/pin-store.test.mjs
-   lib/archive-store.test.mjs lib/settings-navigation.test.mjs components/SessionSidebar.test.mjs`；
+   lib/archive-fork-anchors.test.mjs lib/archive-fork-seams.test.mjs lib/ui-state-migrate.test.mjs
+   lib/settings-navigation.test.mjs components/SessionSidebar.test.mjs`；
 3. 全量测试只在 **CI（Linux）** 当门禁，那边必须 **0 失败**；
 4. 本地要跑全量就带 `--test-force-exit`（否则不收尾），且失败集只能落在 §7.3 那几类里；
    出现新类别（尤其是锚点/接缝挂掉）才当回归处理，先查换行符：`grep -c $'\r' components/AppShell.tsx`。
@@ -804,9 +882,9 @@ Windows 本机跑 `npm test` 已不再是“只差 2 个”：上游 v0.10.0 那
 1. 侧栏项目下拉：图钉出现、点击置顶、顺序变化、刷新后仍在
 2. 会话行：hover 时图钉与重命名/删除同框；已置顶行常亮
 3. 手机/Pad 打开同一实例：一端 pin，另一端在**标签页可见时** ≤2.5 秒自动置顶（切到后台的标签页要等回到前台）
-4. `~/.pi/agent/pi-web/pins.json` 内容符合预期；删掉一个已 pin 会话后其记录消失
+4. `~/.pi/agent/pi-web-session-state.json` 里 `sessions` / `projects` 的 `pinnedAt` 符合预期；删掉一个已 pin 会话后它的记录消失
 5. 侧栏项目行可归档，项目从下拉里消失；设置 → 归档能看到它、能取消归档；删除须输入「确认」或 `confirm`，且不删代码目录
-6. `~/.pi/agent/pi-web/archives.json` 内容符合预期；该项目下会话全部删掉后归档记录被 prune
+6. 同一份统一 UI state 里 `archivedAt` 符合预期；该项目下会话全部删掉后归档标记随之清掉（上游 `deleteSessions` 自己会 `forgetSessionUiState`）
 7. `node scripts/deploy-pi-web.mjs status` 能看到新版本；`node -p "require('./package.json').forkedFrom.commit"` 已指向上游最新 commit；CI 发布日志出现 `✅ OIDC 发布成功`（不是兜底分支）
 
 ---
