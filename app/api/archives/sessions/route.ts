@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
 import { normalizeArchiveKey } from "@/lib/archive-order";
-import { setProjectArchived } from "@/lib/archive-store";
-import { setPin } from "@/lib/pin-store";
 import {
   attachSessionProjectInfo,
   listAllSessions,
@@ -87,10 +85,14 @@ export async function POST(req: Request) {
     }
   }
 
-  if (failed.length === 0) {
-    try { await setPin({ kind: "project", key: projectKey, pinned: false }); } catch { /* ignore */ }
-    try { await setProjectArchived({ key: projectKey, archived: false }); } catch { /* ignore */ }
-  }
+  // 删除后不需要再清理置顶/归档：统一 UI state（上游的
+  // ~/.pi/agent/pi-web-session-state.json）才是唯一真相源，而
+  // deleteSessions 自己会 forgetSessionUiState —— 把被删会话的置顶与归档
+  // 一起清掉。
+  //
+  // 这里曾经多调一次 setPin / setProjectArchived 去清理**旧**存储
+  // （pi-web/pins.json、archives.json）；那两份存储在 v0.11.0 采纳统一 state
+  // 之后就没有人读了，留着只是往没人看的文件里写。
 
   return NextResponse.json({
     ok: failed.length === 0,

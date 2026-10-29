@@ -3,6 +3,7 @@ import { attachSessionProjectInfo, listAllSessions, mergeSessionLists } from "@/
 import { getRpcSessionInfos } from "@/lib/rpc-manager";
 import { readSessionUiState } from "@/lib/session-ui-state";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
+import { migrateLegacyUiStateOnce } from "@/lib/ui-state-migrate-once";
 
 // [archive-fork] Read-only view of the unified UI state (`lib/session-ui-state.ts`).
 //
@@ -48,6 +49,11 @@ function byRecentActivity(a: ArchivedProjectEntry, b: ArchivedProjectEntry): num
 // GET /api/archives - archived session families grouped by server-computed project.
 export async function GET() {
   try {
+    // 旧存储（pins.json / archives.json）只在这台机器从没建过统一状态时才导入，
+    // 一次就够：导入器自己保证「目标存在则不写」。放在这里是因为本路由是 fork 自有
+    // 的，不动上游文件；已经迁移过的机器这一步是零开销的 no-op。
+    await migrateLegacyUiStateOnce();
+
     const state = readSessionUiState();
     const archivedAtById = new Map<string, number>();
     for (const [id, entry] of Object.entries(state.sessions)) {
