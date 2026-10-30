@@ -54,6 +54,17 @@ export const POLICY = {
   // 正确做法是合成 package.json 之后 `npm install` 重新生成 lock。
   // 这里取 theirs 只是为了让合并能往下走，生成的 lock 会被 npm install 覆盖。
   "package-lock.json": "theirs",
+  // 我们的流水线（2026-10-30 钉住）：
+  //
+  // 上游 v0.13.0 把自己的发版换成了「推 v* tag → publish.yml」，并**删掉了**它
+  // 那份 sync-upstream.yml（上游自己的文件，名字和我们的一样）。如果不钉住，
+  // 这次合并会把我们的同步+发版流水线整个删掉 —— fork 就没有自动同步了。
+  //
+  // publish.yml 也钉成 ours：上游新增了同名文件（发它自己的 @agegr/pi-web），
+  // 但我们的 publish.yml 是 fork 专用的「手动重发通道」，而且刻意不监听 tag，
+  // 免得和 sync-upstream.yml 抢同一个版本号（第二个进程必撞 E409）。
+  ".github/workflows/sync-upstream.yml": "ours",
+  ".github/workflows/publish.yml": "ours",
 };
 
 /**
@@ -71,6 +82,11 @@ export const MUST_KEEP = [
   "README.ja.md",
   "README.ru.md",
   "docs/FORK.md",
+  // 我们的同步与发版流水线。上游 v0.13.0 删掉了它自己的 sync-upstream.yml
+  // （与我们的同名），如果不在这里钉住，下次合并就会把 fork 的自动同步删掉 ——
+  // 而删掉之后 GitHub 不会报错，只是定时任务再也不跑，非常难发现。
+  ".github/workflows/sync-upstream.yml",
+  ".github/workflows/publish.yml",
 ];
 
 /**
