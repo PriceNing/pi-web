@@ -311,9 +311,23 @@ jobs:
             exit 0
           fi
           echo "要清理陈旧的 next 标签（指向 $current_next）"
-          # 先试 OIDC：npm 的 Trusted Publishing 授权是按 (包, workflow 文件名, 分支)
-          # 绑定的，这个 workflow 文件名在授权里，所以 dist-tag 也可能被放行。
-          # 不行再退到 NPM_TOKEN（OIDC 明确只授权 publish 时会 401）。
+          # npm 的 dist-tag 写权限有一个坑（2026-10-30 实测）：
+          #
+          #   - `npm dist-tag add`（POST）—— granular token 可以；
+          #   - `npm dist-tag rm`（DELETE）—— 被 npm 拒绝，403：
+          #     "Granular access tokens that bypass two-factor authentication
+          #      may not perform this action."
+          #     npm 的安全模型要求 DELETE 这类敏感操作做真正的 2FA 验证，
+          #     而"跳过 2FA"的凭据被排除在外。
+          #   - OIDC（Trusted Publishing）也不行：它的权限位只有
+          #     npm publish / npm stage publish，没有 dist-tag（实测 401）。
+          #   - npmjs.com 网页上没有删除 dist-tag 的 UI（Versions 页的
+          #     Current Tags 是只读的）。
+          #
+          # 所以这里先试删除（将来若换成不带 bypass 2FA 的 token 就能成），
+          # 删不掉就**改指**：把 next 重新指到本次发布的版本。
+          # 危害一样被消除 —— `npm i @pricening/pi-web@next` 拿到的是当前版本，
+          # 而不是几个月前的旧版本。
           rm -f ~/.npmrc
           if npm dist-tag rm "$PKG" next --registry "$REGISTRY" 2>/dev/null; then
             echo "✅ 已用 OIDC 清理 next 标签"
@@ -325,8 +339,16 @@ jobs:
               echo "✅ 已用 NPM_TOKEN 清理 next 标签"
               exit 0
             fi
+            # 删不掉就改指（POST 是 granular token 允许的）。
+            if [ -n "$published_now" ]; then
+              echo "删除被 npm 拒绝（bypass 2FA 的 token 不能做 DELETE），改为把 next 指向 $published_now"
+              if npm dist-tag add "$PKG@$published_now" next --registry "$REGISTRY"; then
+                echo "✅ next 已改指到 $published_now（危害已消除）"
+                exit 0
+              fi
+            fi
           fi
-          echo "::warning title=未能清理 next 标签::next 仍指向 $current_next。OIDC 不能改 dist-tag 时，需要一个能改 dist-tag 的 npm automation token（存在仓库 secrets 的 NPM_TOKEN 里）。不影响 latest。"
+          echo "::warning title=未能清理 next 标签::next 仍指向 $current_next。npm 不允许 bypass 2FA 的 token 删除 dist-tag；需要换成一个不带 bypass 2FA 的 token。不影响 latest。"
 
       - name: 打包 tarball 作为 Release 附件（内网/镜像拉不到 npm 时的兜底）
         if: steps.version.outputs.skip != '1'
