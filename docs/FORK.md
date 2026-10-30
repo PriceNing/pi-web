@@ -93,7 +93,8 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 | `scripts/pi-web-start.bat` | Windows 常驻启动器（含 `PI_WEB_PIN` 锁版本），由计划任务调用（见 §7.2） |
 | `scripts/bootstrap-production.ps1` | 生产机一键接入：体检 / 装包 / 部署启动器 / 建任务 / 安全切换（见 §7.5） |
 | `scripts/pi-web.service` | Linux systemd 用户服务模板（见 §7.6） |
-| `.github/workflows/sync-upstream.yml` | 同步 + 发版流水线（见 §5.2） |
+| `.github/workflows/sync-upstream.yml` | 同步 + 发版流水线（见 §5.2）；**已钉住为 ours**，上游删同名的它不算数 |
+| `.github/workflows/publish.yml` | 手动重发通道（指定版本号重发，不监听 tag，见 §6.2.1） |
 | `.gitattributes` | `*.bat` / `*.cmd` 存 LF、签出 CRLF（cmd.exe 解析批处理对 LF 不稳） |
 | `docs/FORK.md` | 本文件 |
 
@@ -332,9 +333,11 @@ Tag 约定：
 
 ### 5.1 发布通道：OIDC（当前状态 —— 仓库内**没有任何 secret**）
 
-> ⚠️ **2026-10-29 实测：GitHub 停用了本仓库的 Actions**，于是**发版通道也一并断了**。
-> 症状与排查见 §7.8。恢复办法只有一条：在账号网页上重新启用 Actions（API 改不动）。
-> 停用期间可以把上游合并到本地并验证，但**发不了版** —— OIDC 是唯一的 publish 通道，
+> ⚠️ **2026-10-29/30 实测：GitHub 停用了本仓库的 Actions**（fork 的自动省算力策略），
+> 定时同步停了 7 天、发版通道也一并断了。**已于 2026-10-30 恢复**：在仓库的 Actions 标签页
+> 点 "I understand my workflows, go ahead and re-enable them"。
+> 症状、定位与恢复步骤见 §7.8 —— **如果它再被停用（fork 随时可能再被关），去那里看。**
+> 恢复期间可以把上游合并到本地并验证，但**发不了版** —— OIDC 是唯一的 publish 通道，
 > 本地 token 只有读权限。
 
 已实测确认（v0.9.6）：在 `gh secret list` 为空的情况下，CI 仍成功发出
@@ -443,6 +446,58 @@ npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
 关键前提：**生产机永远按精确版本安装**（见 §7）。这样 registry 上有没有 `latest`
 都不重要 —— 没有任何机器会自动跟进，坏版本最多影响 canary 一台。
 
+### 5.4 CI 推不动 workflow 文件时（2026-10-30 实测）
+
+`GITHUB_TOKEN` **无权修改 `.github/workflows/` 下的文件**。而同步上游很可能带进 workflow 的
+改动（上游改 `ci.yml`、删 `sync-upstream.yml`、加 `publish.yml` …），于是 CI 在最后一步
+「提交合并结果并打 tag」会挂掉：
+
+```
+! [remote rejected] HEAD -> main
+  (refusing to allow a GitHub App to create or update workflow
+   `.github/workflows/publish.yml` without `workflows` permission)
+```
+
+**挂掉的位置很要命**：这一步在「发布到 npm」**之后**。所以那次 CI 的结果是：
+
+- npm 包**已经发出去了**（版本可见、latest 已指向它）；
+- 但 main 没推上去、tag 没打、GitHub Release 没建。
+
+后果是**版本号出现空洞**：npm 上有 `0.12.7`，GitHub 上没有它的 tag 和 Release。
+用户点「查看发布」会 404，且下次发版会直接跳到 `0.12.8`。
+
+**解法（按代价排序）**：
+
+1. **本地推**：`git push origin main` + 补 tag + 补 Release（本地 token 有 `workflow` scope）。
+2. **给仓库加 `GIT_PUSH_TOKEN`**（fine-grained PAT，contents:Read&Write）。workflow 里已经写好
+   兜底逻辑：secret 存在就用它直推，不存在才用 `GITHUB_TOKEN`。**这是最省事的长期解法**，
+   但它需要一个能长期持有的 PAT。
+
+**补空洞的做法**（0.12.7 实测走通）：
+
+```bash
+# 1) 用当时的 main 构造一个版本号提交
+git checkout -b tmp/tag-0.12.7 <当时的 main>
+# 把 package.json 和 package-lock.json 的 version 改成 0.12.7
+npm version 0.12.7 --no-git-tag-version --allow-same-version
+git add package.json package-lock.json && git commit -m "chore(release): v0.12.7"
+
+# 2) 打 tag 并推
+git tag -f v0.12.7 && git push origin refs/tags/v0.12.7:refs/tags/v0.12.7 --force
+
+# 3) 用 npm 上那个包作为 Release 附件（它就是发布时的构建产物）
+curl -sSL -o pi-web-0.12.7.tgz \
+  "https://registry.npmjs.org/@pricening/pi-web/-/pi-web-0.12.7.tgz"
+gh release create v0.12.7 --repo PriceNing/pi-web --title v0.12.7 \
+  --notes-file release-notes.md ./pi-web-0.12.7.tgz
+
+# 4) 把 "Latest" 标记移回真正的当前版本（后建的 Release 会抢走这个标记）
+gh release edit v0.12.8 --repo PriceNing/pi-web --latest
+gh release edit v0.12.7 --repo PriceNing/pi-web --latest=false
+```
+
+补完记得把临时分支和本地 tag 删掉（`git branch -D`、`git tag -d`），否则下次合并会带上它。
+
 ---
 
 ## 6. 上游同步
@@ -487,6 +542,32 @@ node scripts/merge-upstream.mjs
 - 四个门面文件列在 `MUST_KEEP` 里，上游删掉或改名搬走时，合并脚本会把它们恢复回来；
 - 合并成功后脚本把当前门面内容打进 `fork-front-doors` tag，作为**与历史深度无关**的权威副本；
 - 恢复源顺序：合并前的提交 → `fork-front-doors` tag。
+
+### 6.2.1 我们的流水线也要钉住（2026-10-30 实测踩到）
+
+门面不只会被上游删，**我们自己的流水线**也会。
+
+上游 v0.13.0 把发版方式换成了「推 `v*` tag → `publish.yml` 发布」（它自己的
+`sync-upstream.yml` 随之删掉）。**它那份文件和我们同名**，所以那次合并差点把我们的
+同步 + 发版流水线整个带走。
+
+危险的地方在于：**被删掉的 workflow 不报错**，GitHub 只是不再调度它。仓库看起来一切正常，
+只是每天的同步悄无声息地停了 —— 和 §7.8 的 fork 自动停用叠加在一起更难发现。
+
+因此 `POLICY` 和 `MUST_KEEP` 里都钉住了两个文件：
+
+| 文件 | 方向 | 为什么 |
+| --- | --- | --- |
+| `.github/workflows/sync-upstream.yml` | ours | 我们的日常同步 + 发版流水线，上游删同名的它不算数 |
+| `.github/workflows/publish.yml` | ours | 我们自己的「手动重发通道」（见下） |
+
+**我们的 `publish.yml` 刻意不监听 tag**：如果监听 `v*`，那么 `sync-upstream.yml` 推 tag 时
+会同时触发它，两个进程抢同一个版本号，后一个必撞 E409。所以它只接受
+`workflow_dispatch`（手动指定版本号重发），日常发版只有一条路径。
+
+> 教训：**策略表里的一行如果悄悄消失了，不会有任何构建失败** —— 它只是不再保护它指名的那个
+> 文件。所以策略表本身要被测试钉住（`scripts/merge-upstream.test.mjs` 里断言两个 workflow
+> 都在 `POLICY` 和 `MUST_KEEP` 中）。
 
 ### 6.3 CI 报冲突时（本地手工）
 
@@ -797,14 +878,29 @@ systemctl --user enable pi-web      # 补上开机自启（重建 unit 后会丢
 
 ### 7.8 Actions 被停用时，定时同步会静默停摆（2026-10-29 实测）
 
-GitHub 可以**停用整个仓库的 Actions**。停用后的症状很容易误判：
+**确切原因（实测定位，不是猜测）**：本仓库是 **fork**（父仓库 `agegr/pi-web`）。GitHub 对
+fork 仓库有一套独立的「省算力」策略：继承自上游的 workflow 常带定时触发，在 fork 上白跑
+浪费额度，所以 GitHub 会**自动停用**它们。
+
+**恢复方式**：**不在 `Settings → Actions` 里**（那里没有开关，显示一切正常）。要去仓库的
+**Actions 标签页**：
+
+```
+https://github.com/<owner>/<repo>/actions
+```
+
+那里是一整页占位面板，写着 "Workflows on this fork have been disabled"，中间一个绿色按钮
+**"I understand my workflows, go ahead and re-enable them"**。点它即可。
+
+停用后的症状很容易误判：
 
 | 现象 | 说明 |
 | --- | --- |
 | 定时同步不再产生新运行 | `schedule` 事件不再被调度，仓库里几天没动静 |
 | `gh workflow run` 报 422 | `Actions has been disabled for this repository` |
 | 但 `gh api .../actions/workflows` 仍然显示 `active` | workflow 自身状态与**仓库/账号级 Actions 开关**是两回事 |
-| `gh api .../actions/permissions` 仍返回 `enabled: true` | 那是**仓库级**开关；422 来自**账号级**停用，API 改不动 |
+| `gh api .../actions/permissions` 仍返回 `enabled: true` | 那是**仓库级**开关，与 fork 的自动停用无关 |
+| Settings → Actions 页面看起来完全正常 | 那里根本没有 fork 的开关 |
 
 **怎么区分「同步失败」和「同步没被触发」**：看 `actions/runs` 里 `event=schedule` 的最新
 `created_at`。如果连 run 都没有，就不是脚本或冲突的问题，而是**根本没被调度**。
@@ -819,12 +915,15 @@ gh api "repos/<owner>/<repo>/actions/workflows/sync-upstream.yml/runs?per_page=1
 # 2) 仓库级开关（能改，但往往不是它）
 gh api "repos/<owner>/<repo>/actions/permissions"
 
-# 3) 手动触发试试（422 = 账号级停用）
+# 3) 手动触发试试（422 = 被停用了）
 gh api --method POST "repos/<owner>/<repo>/actions/workflows/sync-upstream.yml/dispatches" -f ref=main
 ```
 
-账号级停用**没有 API 可绕**（`PUT .../actions/permissions` 不管用），只能在网页上恢复：
-账号 Settings → Billing & licensing → Usage，或仓库 Settings → Actions → 启用。
+**判断是 fork 自动停用还是别的**：拿同一个账号的**另一个非 fork 仓库**做对照。它的 dispatch
+如果只是报「缺参数」而**不是** 422，就说明账号级 Actions 正常，问题在这个 fork 上。
+上游 `agegr/pi-web` 不是 fork，它照常跑，也印证了这一点。
+
+**没有 API 可绕**：`PUT .../actions/permissions` 改不动它，必须在网页上点那个按钮。
 
 **停用期间发版也会停**：CI 的 OIDC 是唯一的 publish 通道（§5.1、§9），本地 token 只有读
 权限，所以 Actions 停了 = 发不了版。此时只能先把上游合并到本地并验证，等 Actions 恢复后
@@ -832,6 +931,7 @@ gh api --method POST "repos/<owner>/<repo>/actions/workflows/sync-upstream.yml/d
 
 **预防**：给同步加一条「预期没变才跳过」的护栏 —— 上游长期不动时，静默停摆和
 「上游没更新」长得一模一样。定期（哪怕手动）看一眼最近一次 schedule run 的时间戳。
+
 
 
 ---
