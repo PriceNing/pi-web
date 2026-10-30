@@ -88,6 +88,7 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 | `lib/pin-order.test.mjs`、`lib/pin-fork-anchors.test.mjs`、`lib/pin-fork-seams.test.mjs` | pin 的纯逻辑 / **锚点** / 排序接缝测试 |
 | `lib/archive-order.test.mjs`、`lib/archive-fork-anchors.test.mjs`、`lib/archive-fork-seams.test.mjs` | 归档的纯逻辑 / **锚点** / 过滤接缝测试 |
 | `scripts/next-version.mjs`（+测试） | 版本号规则的唯一实现（见 §4） |
+| `scripts/check-sync-watchdog.mjs`（+测试） | 定时同步的看门狗（**不依赖 GitHub**，见 §7.8） |
 | `scripts/set-forked-from.mjs`（+测试） | 维护 `package.json.forkedFrom`，记录对应哪个上游构建（见 §5.2） |
 | `scripts/deploy-pi-web.mjs` | 生产机 status / install / rollback，强制精确版本 + 显式 registry（见 §7.1） |
 | `scripts/pi-web-start.bat` | Windows 常驻启动器（含 `PI_WEB_PIN` 锁版本），由计划任务调用（见 §7.2） |
@@ -95,6 +96,7 @@ node --experimental-strip-types --test lib/pin-*.test.mjs lib/archive-*.test.mjs
 | `scripts/pi-web.service` | Linux systemd 用户服务模板（见 §7.6） |
 | `.github/workflows/sync-upstream.yml` | 同步 + 发版流水线（见 §5.2）；**已钉住为 ours**，上游删同名的它不算数 |
 | `.github/workflows/publish.yml` | 手动重发通道（指定版本号重发，不监听 tag，见 §6.2.1） |
+| `.github/workflows/watchdog.yml` | 定时同步的看门狗（发现停摆就让 run 失败，见 §7.8） |
 | `.gitattributes` | `*.bat` / `*.cmd` 存 LF、签出 CRLF（cmd.exe 解析批处理对 LF 不稳） |
 | `docs/FORK.md` | 本文件 |
 
@@ -931,6 +933,41 @@ gh api --method POST "repos/<owner>/<repo>/actions/workflows/sync-upstream.yml/d
 
 **预防**：给同步加一条「预期没变才跳过」的护栏 —— 上游长期不动时，静默停摆和
 「上游没更新」长得一模一样。定期（哪怕手动）看一眼最近一次 schedule run 的时间戳。
+
+#### 看门狗（两层，都已就位）
+
+**第一层：`scripts/check-sync-watchdog.mjs`（不依赖 GitHub Actions）**
+
+只读公开的 run 列表（匿名 HTTP，不需要任何凭据），判断最近一次 `event=schedule` 的运行
+距今是否超过阈值（默认 48 小时）。退出码：`0` 正常 / `1` 停摆 / `2` 判断不了。
+
+```bash
+node scripts/check-sync-watchdog.mjs                 # 人看的输出
+node scripts/check-sync-watchdog.mjs --json          # 机器可读
+node scripts/check-sync-watchdog.mjs --stale-hours 48
+```
+
+**这一层最重要**：Actions 被整体停用时，workflow 版的看门狗**自己也不会跑**；而这个脚本
+跑在机器上，只靠一次 HTTP 请求，所以停摆时依然能发现。生产机上已经装了它并加了 cron：
+
+```cron
+17 8 * * * /home/nrc/bin/check-sync-watchdog.mjs >> ~/.local/state/pi-web/watchdog.log 2>&1
+```
+
+**第二层：`.github/workflows/watchdog.yml`（在 GitHub 里可见）**
+
+每 6 小时查一次。发现停摆就**让 run 失败**（GitHub 会给管理员发邮件/通知），并把诊断写进
+run 的 summary —— 谁打开 Actions 都能看见。
+
+> **为什么不用 issue 报告**：**fork 仓库的 Issues 默认被禁用**（本仓库 `has_issues: false`），
+> Discussions 也禁用，Projects 需要额外的 token scope。第一次实现就是撞在这上面失败的
+> （`HttpError: Issues has been disabled in this repository`）。所以看门狗只依赖两样一定
+> 存在的东西：**run 的失败状态**和**run 的 summary**。
+
+**注意**：两层的判断逻辑必须一致（`scripts/check-sync-watchdog.mjs` 里有单元测试，
+workflow 版照着同一套写）。特别是「从来没被调度过」**不等于**停摆 —— 刚建好的仓库当然
+还没有 schedule 运行，所以要看「这个仓库最早的 run 也有多旧」。
+
 
 
 
