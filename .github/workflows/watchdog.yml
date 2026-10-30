@@ -9,17 +9,20 @@ name: Watchdog
 #   只是每天的同步悄无声息地停了。上游那 7 天里就是这样断更的，而且
 #   「同步停了」和「上游本来就没更新」在日志里长得一模一样。
 #
-#   这个看门狗用的是**另一条**定时线：如果 Actions 被整体停用，它自己也不会跑
-#   （那正是它存在的意义 —— 它是那个「什么都不发生」的反证）。所以它能做的
-#   是发现「sync-upstream 没跑但别的跑了」，以及在 Actions 恢复后立刻告诉你
-#   断更了多久。
+# 这个 workflow 只做到「**发现并说清楚**」这一步：
 #
-# 判定逻辑（只用公开的 run 列表，不需要任何 secret）：
+#   - 发现停摆 → **本 run 失败**（GitHub 会给仓库管理员发邮件/通知），
+#     并把原因写进 run 的 summary —— 谁打开 Actions 都能看见；
+#   - 一切正常 → 成功，并在 summary 里写下最近一次 schedule 运行的时间。
 #
-#   1. 取 sync-upstream 最近一次 event=schedule 的 run；
-#   2. 距离它超过 48 小时 → 报 issue（"定时同步已停摆"）；
-#   3. 距离它超过 48 小时但 issue 已存在 → 不重复开，避免刷屏；
-#   4. 一切正常 → 关掉之前开的 issue（如果还没关）。
+# 为什么不用 issue 报告：**fork 仓库的 Issues 默认被禁用**（本仓库
+# `has_issues: false`），Discussions 同样禁用，Projects 需要额外的 token
+# scope。第一次实现就是撞在这上面失败的。所以这里只依赖两样一定存在的东西：
+# **run 的失败状态**和**run 的 summary**。
+#
+#   另外还有一层不依赖 GitHub 的检测：scripts/check-sync-watchdog.mjs，
+#   它只读公开的 run 列表（匿名 HTTP），可以在生产机上跑，Actions 全停时
+#   依然有效。
 #
 # 手动触发：gh workflow run watchdog.yml --repo PriceNing/pi-web --ref main
 
@@ -32,7 +35,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: watchdog
@@ -48,12 +50,10 @@ jobs:
         env:
           SYNC_WORKFLOW: "sync-upstream.yml"
           STALE_HOURS: "48"
-          ISSUE_TITLE: "定时同步已停摆：sync-upstream.yml 超过 48 小时没有 schedule 运行"
         with:
           script: |
             const workflow = process.env.SYNC_WORKFLOW;
             const staleHours = Number(process.env.STALE_HOURS);
-            const issueTitle = process.env.ISSUE_TITLE;
 
             const { owner, repo } = context.repo;
 
@@ -65,85 +65,92 @@ jobs:
             });
 
             const scheduled = runs.data.workflow_runs
-              .filter((r) => r.event === "schedule")
-              .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+              .filter((r) => r.event === "schedule" && typeof r.created_at === "string")
+              .map((r) => ({ created_at: r.created_at, time: Date.parse(r.created_at) }))
+              .filter((r) => Number.isFinite(r.time))
+              .sort((a, b) => a.time - b.time);
 
             const latest = scheduled[scheduled.length - 1];
             const now = Date.now();
 
-            const issues = await github.rest.issues.listForRepo({
-              owner, repo, state: "open", per_page: 100,
-            });
-            const existing = issues.data.find((i) => i.title === issueTitle);
+            // 判断分支和 scripts/check-sync-watchdog.mjs 保持一致：
+            // 从来没被调度过 ≠ 停摆 —— 刚建好的仓库当然还没有 schedule 运行。
+            // 所以要看「这个仓库最早的 run 也有多旧」。
+            let stale = false;
+            let ageHours = null;
+            let reason = "";
+            let lastScheduleAt = null;
 
             if (!latest) {
-              // 从来没被调度过：要么是刚建好的仓库，要么是被停用后还没恢复过。
-              const anyRun = runs.data.workflow_runs[0];
-              const ageHours = anyRun ? (now - new Date(anyRun.created_at)) / 3600000 : Infinity;
-              if (ageHours > staleHours) {
-                const body = [
-                  `\`${workflow}\` 从来没有被定时调度过（仓库里最早的 run 已是 ${Math.round(ageHours)} 小时前）。`,
-                  "",
-                  "常见原因（本仓库是 fork）：GitHub 会自动停用 fork 上的 workflow 来省算力。",
-                  "恢复方式：打开仓库的 **Actions 标签页**（不是 Settings → Actions），",
-                  `点绿色按钮 "I understand my workflows, go ahead and re-enable them"。`,
-                  "",
-                  "详见 docs/FORK.md §7.8。",
-                ].join("\n");
-                if (existing) {
-                  await github.rest.issues.update({
-                    owner, repo, issue_number: existing.number, body,
-                  });
-                  core.info("已更新既有的停摆 issue");
-                } else {
-                  await github.rest.issues.create({ owner, repo, title: issueTitle, body });
-                  core.info("已开 issue：定时同步从未被调度");
-                }
+              const anyRun = runs.data.workflow_runs
+                .map((r) => r.created_at)
+                .filter((v) => typeof v === "string")
+                .sort()
+                .at(-1);
+              const anyAge = anyRun ? (now - Date.parse(anyRun)) / 3600000 : Infinity;
+              if (anyAge > staleHours) {
+                stale = true;
+                ageHours = anyAge;
+                reason = "从来没有被定时调度过";
               } else {
-                core.info("还没有 schedule 运行，但仓库很新，先不报警");
+                reason = `仓库还很新（最早的 run 才是 ${Math.round(anyAge)} 小时前），先不报警`;
               }
-              return;
-            }
-
-            const ageHours = (now - new Date(latest.created_at)) / 3600000;
-            const ageText = `${Math.round(ageHours)} 小时前`;
-
-            if (ageHours > staleHours) {
-              const body = [
-                `\`${workflow}\` 最近一次定时运行是 ${ageText}（${latest.created_at}），`,
-                `已经超过 ${staleHours} 小时没有新的 schedule 运行。`,
-                "",
-                "这说明定时同步**没有被调度**，而不是同步失败了。",
-                "最常见的原因（本仓库是 fork）：GitHub 自动停用了 fork 上的 workflow。",
-                "",
-                "恢复方式：打开仓库的 **Actions 标签页**（不是 Settings → Actions），",
-                `点绿色按钮 "I understand my workflows, go ahead and re-enable them"。`,
-                "",
-                "恢复后手动触发一次同步：",
-                "```",
-                "gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_publish=true",
-                "```",
-                "",
-                "详见 docs/FORK.md §7.8 与 §6.3。",
-              ].join("\n");
-              if (existing) {
-                await github.rest.issues.update({
-                  owner, repo, issue_number: existing.number, body,
-                });
-                core.info("已更新既有的停摆 issue");
-              } else {
-                await github.rest.issues.create({ owner, repo, title: issueTitle, body });
-                core.info("已开 issue：定时同步停摆");
-              }
-              return;
-            }
-
-            // 正常。如果之前开过停摆的 issue，把它关掉。
-            if (existing) {
-              await github.rest.issues.update({
-                owner, repo, issue_number: existing.number, state: "closed",
-              });
-              core.info("定时同步恢复正常，已关闭之前的停摆 issue");
             } else {
-              core.info(`定时同步正常：最近一次 schedule 运行在 ${ageText}`);
+              ageHours = (now - Date.parse(latest.created_at)) / 3600000;
+              lastScheduleAt = latest.created_at;
+              if (ageHours > staleHours) {
+                stale = true;
+                reason = "超过阈值没有新的 schedule 运行";
+              }
             }
+
+            const restoreHint = [
+              "## 怎么恢复",
+              "",
+              "本仓库是 **fork**（父仓库 `agegr/pi-web`），GitHub 会自动停用 fork 上的",
+              "workflow 来省算力 —— 被删掉/停用的 workflow **不报错**，只是不再被调度。",
+              "",
+              "打开仓库的 **Actions 标签页**（不是 Settings → Actions，那里没有开关）：",
+              "",
+              `https://github.com/${owner}/${repo}/actions`,
+              "",
+              '那里是一整页占位面板，点绿色按钮 **"I understand my workflows, go ahead and re-enable them"**。',
+              "",
+              "恢复后手动触发一次同步（会强制发版，用来确认整条链路真的活了）：",
+              "",
+              "```",
+              `gh workflow run sync-upstream.yml --repo ${owner}/${repo} --ref main -f force_publish=true`,
+              "```",
+              "",
+              "详见 `docs/FORK.md` §7.8（症状与恢复）与 §6.3（本地手工流程）。",
+            ].join("\n");
+
+            if (stale) {
+              const summary = [
+                "## ✗ 定时同步已停摆",
+                "",
+                `\`${workflow}\` 的最近一次 schedule 运行是 **${Math.round(ageHours)} 小时前**（阈值 ${staleHours} 小时）。`,
+                reason,
+                "",
+                lastScheduleAt ? `最后一次 schedule 运行时间：\`${lastScheduleAt}\`` : "",
+                "",
+                "这说明定时同步**没有被调度**，而不是同步失败了 ——",
+                "「同步停了」和「上游本来就没更新」在日志里长得一模一样，必须主动查。",
+                "",
+                restoreHint,
+              ].filter((line) => line !== "").join("\n");
+              await core.summary.addRaw(summary).write();
+              core.setFailed(`定时同步已停摆：最近一次 schedule 运行是 ${Math.round(ageHours)} 小时前（阈值 ${staleHours} 小时）`);
+              return;
+            }
+
+            const summary = [
+              "## ✓ 定时同步正常",
+              "",
+              `最近一次 schedule 运行：${lastScheduleAt ?? "（还没有过）"}`,
+              ageHours === null ? "" : `距今 ${Math.round(ageHours)} 小时（阈值 ${staleHours} 小时）。`,
+              "",
+              reason && !lastScheduleAt ? reason : "",
+            ].filter((line) => line !== "").join("\n");
+            await core.summary.addRaw(summary).write();
+            core.info(`定时同步正常：最近一次 schedule 运行在 ${Math.round(ageHours ?? 0)} 小时前`);
