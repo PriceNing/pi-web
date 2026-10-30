@@ -37,6 +37,26 @@ test("门面文件被钉住：上游删掉也要恢复", () => {
   }
 });
 
+test("fork 的两个流水线被钉住：上游删掉也不能带走", () => {
+  // 上游 v0.13.0 删掉了它自己的 sync-upstream.yml（和我们同名），并新增了
+  // publish.yml。没钉住的话，一次合并就把 fork 的自动同步删了 —— 而删掉的
+  // workflow 不报错，只是不再被调度，非常难发现。
+  for (const file of [".github/workflows/sync-upstream.yml", ".github/workflows/publish.yml"]) {
+    assert.equal(POLICY[file], "ours", `${file} 的策略必须是 ours`);
+    assert.ok(MUST_KEEP.includes(file), `${file} 不在 MUST_KEEP 里`);
+  }
+});
+
+test("publish.yml 刻意不监听 tag：否则会和日常发版抢同一个版本号", () => {
+  // sync-upstream.yml 推 v* tag；如果 publish.yml 也监听 tag，两个进程会同时
+  // 发布同一个版本，后一个必撞 E409。所以 publish.yml 只能手动 dispatch。
+  const publish = readFileSync(new URL("../.github/workflows/publish.yml", import.meta.url), "utf8");
+  assert.match(publish, /workflow_dispatch:/);
+  assert.doesNotMatch(publish, /tags:\s*\[/);
+  // 也不能监听 push（main 的 push 会跟着 sync-upstream 的提交一起触发）。
+  assert.doesNotMatch(publish, /^on:\s*\n\s*push:/m);
+});
+
 test("MUST_KEEP 里的文件都真实存在", () => {
   for (const file of MUST_KEEP) {
     assert.ok(existsSync(new URL(`../${file}`, import.meta.url)), `${file} 不存在`);
