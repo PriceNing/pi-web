@@ -1,0 +1,69 @@
+import type { SessionInfo } from "./types";
+import { workspaceKeyOf } from "./workspace-memory";
+// [pin-fork]
+import { comparePinnedFirst } from "./pin-order";
+
+export interface RecentProject {
+  /** Stable server-provided identity used for comparison and Map keys. */
+  key: string;
+  /** Original project path used for display and filesystem operations. */
+  root: string;
+}
+
+/** Projects sorted by most recent activity and deduplicated by stable key. */
+export function getRecentProjects(
+  sessions: readonly SessionInfo[],
+  // [pin-fork] Optional pin set keyed by project identity: pinned projects come
+  // first, and pinned projects keep activity order among themselves.
+  pinnedProjectKeys?: ReadonlySet<string>,
+  // [archive-fork] Archived projects stay on disk but drop out of the sidebar.
+  archivedProjectKeys?: ReadonlySet<string>,
+): RecentProject[] {
+  const latestByProject = new Map<string, { root: string; modified: string }>();
+  for (const session of sessions) {
+    const root = session.projectRoot ?? session.cwd;
+    if (!root) continue;
+    const key = workspaceKeyOf(session);
+    if (archivedProjectKeys?.has(key)) continue;
+    const previous = latestByProject.get(key);
+    if (!previous || session.modified > previous.modified) {
+      latestByProject.set(key, { root, modified: session.modified });
+    }
+  }
+  return [...latestByProject.entries()]
+    .sort((a, b) => comparePinnedFirst(
+      Boolean(pinnedProjectKeys?.has(a[0])),
+      Boolean(pinnedProjectKeys?.has(b[0])),
+    ) || b[1].modified.localeCompare(a[1].modified))
+    .map(([key, { root }]) => ({ key, root }));
+}
+
+// [archive-fork] Ours: the archive page and its bulk delete need the sessions of
+// one projectKey. Upstream's version of this file has no such export, so it lives
+// here as part of the patch set (see docs/FORK.md §2.1).
+export function sessionsForProject(
+  sessions: readonly SessionInfo[],
+  projectKey: string,
+): SessionInfo[] {
+  return sessions.filter((session) => workspaceKeyOf(session) === projectKey);
+}
+
+export function getProjectActivity(
+  sessions: readonly SessionInfo[],
+  runningSessionIds: ReadonlySet<string>,
+  unreadSessionIds: ReadonlySet<string>,
+): Map<string, { running: number; unread: number }> {
+  const counts = new Map<string, { running: number; unread: number }>();
+  for (const session of sessions) {
+    const key = workspaceKeyOf(session);
+    if (!key) continue;
+    let entry = counts.get(key);
+    if (!entry) {
+      entry = { running: 0, unread: 0 };
+      counts.set(key, entry);
+    }
+    if (runningSessionIds.has(session.id)) entry.running++;
+    if (unreadSessionIds.has(session.id)) entry.unread++;
+  }
+  return counts;
+}
