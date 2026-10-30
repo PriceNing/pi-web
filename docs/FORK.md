@@ -1011,31 +1011,65 @@ pin / archive 数据落在 `~/.pi/agent/pi-web/{pins,archives}.json`：备份/�
    `npm dist-tag rm` 在 OIDC 下返回 `401 Unauthorized - PUT .../dist-tags/next`。
    npm 的授权范围只有 `publish`。所以「让 CI 顺手把陈旧的 `next` 标签删掉」在 OIDC 下做不成。
 
-### 9.1 删掉陈旧 dist-tag 的唯一路径
+### 9.1 陈旧 dist-tag：删不掉，就改指（2026-10-30 实测定论）
 
 2026-10-19 的实测结论：这个包还留着一个 `next` 标签，指向 0.9.1（2026-09-16），
 早被 `latest` 超过，留着会让 `npm i @pricening/pi-web@next` 装到一个月前的旧版本。
 
-我们只发 `latest`（理由见 §5.3），所以 `next` 是个陷阱，要删。
+我们只发 `latest`（理由见 §5.3），所以 `next` 是个陷阱。
 
-**需要你做一次**（因为只有账号所有者能签发 automation token）：
+#### 删不掉：npm 的安全政策
+
+2026-10-30 实测了全部四条路：
+
+| 路径 | 结果 |
+| --- | --- |
+| `npm dist-tag rm`（DELETE）+ granular token（bypass 2FA） | **403**：`Granular access tokens that bypass two-factor authentication may not perform this action.` |
+| `npm dist-tag add`（POST）+ 同一个 token | **✓ 成功** |
+| OIDC（Trusted Publishing） | **401**：它的权限位只有 `npm publish` / `npm stage publish`，没有 dist-tag |
+| npmjs.com 网页 | **✗ 没有 UI**：Versions 页的 Current Tags 是只读表，Settings 页里也没有 dist-tag 区块 |
+
+npm 的安全模型要求 DELETE 这类敏感操作做**真正的 2FA 验证**，而"跳过 2FA"的凭据被排除在外。
+所以**只要用的是 granular + bypass 2FA 的 token，就删不掉任何 dist-tag**。
+
+#### 所以：改指，而不是删
+
+危害的实质是「`@next` 指向一个旧版本」。既然 **POST（改指）可行**，把它指到当前版本
+就同样消除了危害：
 
 ```bash
-# 1) 在 npmjs.com 生成一个 automation token：
-#    Access Tokens → Generate New Token → Automation
-#    勾选 "Read and write"（改 dist-tag 需要写权限）
-#    只对这个包有效最好（Package access: 只选 @pricening/pi-web）
+npm dist-tag add "@pricening/pi-web@<当前版本>" next
+```
 
-# 2) 存进仓库 secret（CI 里就能自动清理）
+workflow 的清理步骤现在的顺序是：**先试删除**（将来若换成不带 bypass 2FA 的 token 就能走
+干净路径）→ 被拒就**改指**到本次发布的版本 → 都不行才留 warning。
+
+#### 已经处理完
+
+2026-10-30 实测（从 `next=0.9.1` 这个坏状态出发）：DELETE 返回 403，改指成功，
+`next` 现在指向 0.12.8。
+
+> 还有个 `testtag`（探测权限时留下的）删不掉，但它指向 0.12.8（正确版本），**无实际危害**，
+> 只是多一个标签名。将来若签发了不带 bypass 2FA 的 token，一并清掉即可。
+
+#### 怎么配 token（若将来要删）
+
+```bash
+# 1) 在 npmjs.com 生成 token：Access Tokens → Generate New Token → Granular
+#    Permissions: Read and write（改 dist-tag 需要写权限）
+#    Select packages: 只选 @pricening/pi-web
+#    ⚠️ 如果目标是**删除** dist-tag，不要勾 "Bypass two-factor authentication"
+#       （但那样 npm 可能拒发 —— 这就是删不掉的根本原因）
+#
+# 2) 存进仓库 secret
 gh secret set NPM_TOKEN --repo PriceNing/pi-web --body "<那个 token>"
-
+#
 # 3) 触发清理（不改版本、不发版）
 gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f fix_dist_tag=true
 ```
 
 `fix_dist_tag` 这个 dispatch input 就是为它准备的：它只跑清理那一步，
-不构建、不发版。workflow 里那一步会**先试 OIDC、再退到 `NPM_TOKEN`**，
-所以配了 secret 之后它一定能删掉；没配则只留一条 warning，不影响 `latest`。
+不构建、不发版。
 
 > 凭据只进 GitHub secret，**不要**写进本仓库任何文件（见 §0 的红线）。
 
