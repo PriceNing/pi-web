@@ -56,12 +56,12 @@ jobs:
             const issueTitle = process.env.ISSUE_TITLE;
 
             const { owner, repo } = context.repo;
-            const sync = await github.rest.actions.getWorkflowByName({
-              owner, repo, workflow_id: workflow,
-            });
 
+            // 直接按**文件名**列 run：GitHub 的 REST 接受 workflow 文件名，
+            // 不必先查 workflow id（而且 getWorkflowByName 在 github-script v7 的
+            // octokit 版本里并不存在，用了会直接 "is not a function"）。
             const runs = await github.rest.actions.listWorkflowRuns({
-              owner, repo, workflow_id: sync.data.id, per_page: 50,
+              owner, repo, workflow_id: workflow, per_page: 50,
             });
 
             const scheduled = runs.data.workflow_runs
