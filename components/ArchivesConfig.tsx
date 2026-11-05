@@ -129,6 +129,18 @@ const LABELS: Record<"en" | "zh-CN" | "zh-TW", Record<LabelKey, string>> = {
   },
 };
 
+/**
+ * [archive-fork] The Settings section's own label. It lives here, next to the
+ * page's strings, so `SettingsPanel.tsx` only has to import it: the upstream
+ * file stays free of fork-specific constants and upstream merges keep hitting
+ * one clean import instead of a conflict.
+ */
+export const ARCHIVE_SECTION_LABEL: Record<string, string> = {
+  en: LABELS.en.title,
+  "zh-CN": LABELS["zh-CN"].title,
+  "zh-TW": LABELS["zh-TW"].title,
+};
+
 const UI_STATE_URL = "/api/sessions/ui-state";
 
 function interpolate(template: string, params: Record<string, string | number>): string {

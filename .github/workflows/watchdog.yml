@@ -13,6 +13,9 @@ name: Watchdog
 #
 #   - 发现停摆 → **本 run 失败**（GitHub 会给仓库管理员发邮件/通知），
 #     并把原因写进 run 的 summary —— 谁打开 Actions 都能看见；
+#   - 发现最近一次同步**跑失败了** → 同样让本 run 失败并写明原因
+#     （2026-11-05 补：只看「有没有 schedule 运行」会漏掉这种形态 ——
+#      11-02/03/04 连着三天失败，run 一直有，看门狗却连报三天「✓ 正常」）；
 #   - 一切正常 → 成功，并在 summary 里写下最近一次 schedule 运行的时间。
 #
 # 为什么不用 issue 报告：**fork 仓库的 Issues 默认被禁用**（本仓库
@@ -66,7 +69,13 @@ jobs:
 
             const scheduled = runs.data.workflow_runs
               .filter((r) => r.event === "schedule" && typeof r.created_at === "string")
-              .map((r) => ({ created_at: r.created_at, time: Date.parse(r.created_at) }))
+              .map((r) => ({
+                created_at: r.created_at,
+                conclusion: r.conclusion ?? null,
+                status: r.status ?? null,
+                id: r.id,
+                time: Date.parse(r.created_at),
+              }))
               .filter((r) => Number.isFinite(r.time))
               .sort((a, b) => a.time - b.time);
 
@@ -141,6 +150,40 @@ jobs:
               ].filter((line) => line !== "").join("\n");
               await core.summary.addRaw(summary).write();
               core.setFailed(`定时同步已停摆：最近一次 schedule 运行是 ${Math.round(ageHours)} 小时前（阈值 ${staleHours} 小时）`);
+              return;
+            }
+
+            // 调度正常，但最近一次同步**跑失败了** —— 这也是断更，而且更隐蔽：
+            // run 一直有，不看 run 列表的人不会知道它每次都失败。
+            // 2026-11-02/03/04 就是这样断了三天（合并停在 SettingsPanel.tsx）。
+            const lastConclusion = latest?.conclusion ?? null;
+            if (!stale && latest && ["failure", "cancelled", "timed_out"].includes(lastConclusion)) {
+              const summary = [
+                "## ✗ 定时同步在跑，但最近一次失败了",
+                "",
+                `最近一次 schedule 运行：\`${latest.created_at}\`（结论：**${lastConclusion}**）`,
+                `距今 ${Math.round(ageHours)} 小时（阈值 ${staleHours} 小时）。`,
+                "",
+                "调度是正常的，但那次同步**没有成功** —— 最常见的原因是上游合并停在",
+                "了需要人工判断的冲突上（脚本会停下，等人处理）。",
+                "",
+                "打开这次 run 看它停在哪一步：",
+                "",
+                `https://github.com/${owner}/${repo}/actions/runs/${latest.id}`,
+                "",
+                "## 怎么处理",
+                "",
+                "```",
+                "git clone https://github.com/" + owner + "/" + repo + ".git && cd " + repo,
+                "node scripts/merge-upstream.mjs",
+                "# 解掉冲突后提交推送，再触发一次发版：",
+                `gh workflow run sync-upstream.yml --repo ${owner}/${repo} --ref main -f force_publish=true`,
+                "```",
+                "",
+                "详见 `docs/FORK.md` §12。",
+              ].filter((line) => line !== "").join("\n");
+              await core.summary.addRaw(summary).write();
+              core.setFailed(`定时同步最近一次运行失败（${lastConclusion}）：run ${latest.id}`);
               return;
             }
 

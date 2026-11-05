@@ -75,6 +75,9 @@ jobs:
 
       - name: 合并上游（策略化解冲突，只有人工判断才停）
         id: merge
+        env:
+          # 开 issue 要用它（本 fork 禁用了 Issues，所以下面会失败并如实报告）。
+          GH_TOKEN: ${{ github.token }}
         run: |
           # 用 scripts/merge-upstream.mjs 而不是裸 `git merge`：
           #   1) README 门面、上游自己的文档译文、上游负责的代码文件——这些冲突方向早已定死，
@@ -82,6 +85,7 @@ jobs:
           #   2) 上游删掉我们的门面时（上游 2026-10-14 那次「重命名 + 删除」就是这么
           #      吞掉中文 README 的），脚本把门面恢复回来；
           #   3) 剩下真需要人判断的，脚本会开 issue——断更不再静悄悄发生。
+          #      （本 fork 禁用了 Issues，开不成时 CI 会如实说“开不了”，不再谎报。）
           set +e
           node scripts/merge-upstream.mjs
           merge_status=$?
@@ -102,7 +106,30 @@ jobs:
                 process.stdout.write((r.needsDecision ?? []).join(' '));
               } catch { process.stdout.write('(见日志)'); }
             ")
-            echo "::error title=上游合并需要判断::方向已定的冲突已自动解决，这些文件需要人来判断：$manual 。脚本已开 issue；处理方式见 docs/FORK.md §12。本次不发版。"
+            # 这个 fork 的 Issues 是禁用的，脚本的 issue 告警发不出去（2026-11-02
+            # 起的断更就是这么来的：脚本停了三天，一句提醒都没送到）。所以这里
+            # 自己再试一次，并把结果如实写进 run summary —— **绝不谎报已开 issue**。
+            echo "### ⛔ 上游合并需要人工判断" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "方向已定的冲突已自动解决，这些文件需要你来判断：" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            for f in $manual; do echo "- \`$f\`" >> "$GITHUB_STEP_SUMMARY"; done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "处理方式见 docs/FORK.md §12：本地跑 \`node scripts/merge-upstream.mjs\`，" >> "$GITHUB_STEP_SUMMARY"
+            echo "解完提交并推送，再手动触发一次发版：" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_publish=true\`。" >> "$GITHUB_STEP_SUMMARY"
+            issue_url=""
+            if gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "上游合并需要判断：$(echo $manual | wc -w) 个文件" \
+              --body "定时同步在上游合并处停下了，需要人工判断的文件：$manual。详见 run $GITHUB_RUN_ID。" \
+              >/tmp/issue-out.txt 2>/tmp/issue-err.txt; then
+              issue_url=$(tail -1 /tmp/issue-out.txt)
+              echo "已开 issue: $issue_url" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "⚠️ 开不了 issue（本 fork 禁用了 Issues）：$(head -1 /tmp/issue-err.txt)" >> "$GITHUB_STEP_SUMMARY"
+              echo "⚠️ 开不了 issue（本 fork 禁用了 Issues），请看这个 run 的 summary。" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "::error title=上游合并需要判断::方向已定的冲突已自动解决，这些文件需要人来判断：$manual 。见本次 run 的 summary；处理方式见 docs/FORK.md §12。本次不发版。"
             exit 1
           fi
           if [ "$merge_status" != "0" ]; then

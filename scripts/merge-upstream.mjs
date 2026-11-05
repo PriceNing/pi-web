@@ -246,10 +246,22 @@ export function sealFrontDoors(cwd = ROOT, { mustKeep = MUST_KEEP } = {}) {
   return { sealed: true, files: existing, commit };
 }
 
-/** 冲突要人来判断时，开一个 issue，别让它安静地断更。 */
+/**
+ * 冲突要人来判断时，开一个 issue，别让它安静地断更。
+ *
+ * 但这个 fork 的 Issues 是禁用的，`gh issue create` 必然失败。所以这条通道
+ * 只能算「尽力而为」：成功了就更好，失败了就必须让调用方知道——绝不能
+ * 打印「已开 issue」却什么也没开（2026-11-02 起的断更就是这么来的：
+ * 脚本停了 3 天，告警全丢，一句都没说）。
+ *
+ * 返回 true 表示 issue 真的开成了。
+ */
 function openIssue(manual, cwd = ROOT) {
   const token = process.env.GITHUB_TOKEN;
-  if (!token) return;
+  if (!token) {
+    console.warn("[merge-upstream] 没有 GITHUB_TOKEN，开不了 issue（不影响合并结果）");
+    return false;
+  }
   const title = `上游合并需要判断：${manual.length} 个文件`;
   const body = [
     "定时同步在上游合并处停下了，方向已定的冲突已自动解决，剩下这些需要人来判断：",
@@ -264,15 +276,17 @@ function openIssue(manual, cwd = ROOT) {
   try {
     const git = makeGit(cwd);
     git.run(["config", "user.name", "github-actions[bot]"]);
-    git.run(["config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"]);
+    git.run(["config", "user.email", "41898282+github-actions[bot]@users.noreply-noreply.github.com"]);
     execFileSync("gh", ["issue", "create", "--repo", "PriceNing/pi-web", "--title", title, "--body", body], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, GH_TOKEN: token },
     });
+    return true;
   } catch (error) {
     console.warn(`[merge-upstream] 开 issue 失败（不影响合并结果）: ${String(error?.message ?? error)}`);
+    return false;
   }
 }
 
@@ -462,7 +476,12 @@ export function syncUpstream({ cwd = ROOT, dryRun = false, fetchOrigin = true } 
       notes.push(`恢复了被上游删掉的门面: ${restored.join(", ")}`);
     }
     writeReport({ resolved, manual, incoming }, cwd);
-    openIssue(manual, cwd);
+    const opened = openIssue(manual, cwd);
+    notes.push(
+      opened
+        ? "已开 issue 提醒需要人工判断"
+        : "开不了 issue（本 fork 禁用了 Issues）：需要人工判断，见 run summary 与 docs/FORK.md §12",
+    );
     return { incoming, resolved, manual, ok: false, notes };
   }
 

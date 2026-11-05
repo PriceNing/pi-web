@@ -14,6 +14,11 @@
 //   机器上（生产机 / 任何能上网的机器），只靠匿名 HTTP 请求判断，
 //   不需要 GitHub 凭据。
 //
+//   2026-11-05 补：它原先只看「有没有 schedule 运行」，所以只抓得到
+//   「调度停了」。但真正断更的一种形态是**调度正常、run 失败**：
+//   11-02/03/04 连着三天失败（合并停在 SettingsPanel.tsx），run 一直有，
+//   看门狗却报「✓ 正常」。现在它也看最近一次 schedule 的结论。
+//
 // 用法：
 //   node scripts/check-sync-watchdog.mjs                    # 打印状态，退出码 0/1
 //   node scripts/check-sync-watchdog.mjs --repo PriceNing/pi-web
@@ -21,9 +26,10 @@
 //   node scripts/check-sync-watchdog.mjs --json              # 机器可读的输出
 //
 // 退出码：
-//   0 = 定时同步在正常被调度
+//   0 = 定时同步在正常被调度，且最近一次跑成功了
 //   1 = 停摆（超过阈值没有 schedule 运行）
 //   2 = 判断不了（网络问题、仓库不存在、API 变了）
+//   3 = 调度正常但最近一次 run 失败（合并卡住等人判断）
 
 const DEFAULT_REPO = "PriceNing/pi-web";
 const DEFAULT_WORKFLOW = "sync-upstream.yml";
@@ -50,8 +56,39 @@ export function latestScheduledRun(payload) {
 }
 
 /**
+ * 最近一次 schedule 运行的结论（成功 / 失败）。
+ *
+ * 调度正常但 run 失败，同样是断更 —— 脚本会停下等人判断，而人不会知道
+ * （这个 fork 的 Issues 被禁用，脚本的 issue 告警发不出去）。
+ *
+ * @param {{workflow_runs?: {event?: string, created_at?: string, conclusion?: string|null, status?: string|null}[]}} payload
+ * @returns {{created_at: string, conclusion: string|null, status: string|null, id?: number} | null}
+ */
+export function latestScheduledConclusion(payload) {
+  const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : [];
+  const scheduled = runs
+    .filter((run) => run?.event === "schedule" && typeof run?.created_at === "string")
+    .map((run) => ({
+      created_at: run.created_at,
+      conclusion: run.conclusion ?? null,
+      status: run.status ?? null,
+      id: run.id,
+      time: Date.parse(run.created_at),
+    }))
+    .filter((run) => Number.isFinite(run.time))
+    .sort((a, b) => a.time - b.time);
+  return scheduled.length > 0 ? scheduled[scheduled.length - 1] : null;
+}
+
+/**
  * 判断这次检查的结论。
- * @param {{latest: {created_at: string}|null, anyRunCreatedAt?: string|null, now?: number}} input
+ *
+ * 三种断更形态：
+ *   1. 调度停了（fork 被自动停用 workflow）→ stale
+ *   2. 调度正常，但最近一次 run 失败 → failed（合并卡住等人判断）
+ *   3. 一切正常 → ok
+ *
+ * @param {{latest: {created_at: string}|null, anyRunCreatedAt?: string|null, latestConclusion?: {conclusion?: string|null}|null, now?: number}} input
  * @param {{staleHours: number}} options
  */
 export function evaluate(input, { staleHours = DEFAULT_STALE_HOURS } = {}) {
@@ -71,6 +108,12 @@ export function evaluate(input, { staleHours = DEFAULT_STALE_HOURS } = {}) {
   }
   const ageHours = (now - Date.parse(input.latest.created_at)) / 3_600_000;
   if (ageHours > staleHours) return { state: "stale", reason: "no-schedule-run", ageHours };
+  // 调度正常，但最近一次同步失败了 —— 也是断更，而且更隐蔽：
+  // run 一直有，不看 run 列表的人不会知道它每次都失败。
+  const conclusion = input.latestConclusion?.conclusion;
+  if (conclusion === "failure" || conclusion === "cancelled" || conclusion === "timed_out") {
+    return { state: "failed", reason: `schedule-run-${conclusion}`, ageHours };
+  }
   return { state: "ok", reason: "recent-schedule-run", ageHours };
 }
 
@@ -121,9 +164,15 @@ async function main() {
     .at(-1) ?? null;
 
   const verdict = evaluate(
-    { latest: latestScheduledRun(payload), anyRunCreatedAt: anyRun },
+    {
+      latest: latestScheduledRun(payload),
+      anyRunCreatedAt: anyRun,
+      latestConclusion: latestScheduledConclusion(payload),
+    },
     { staleHours: args.staleHours },
   );
+
+  const lastRun = latestScheduledConclusion(payload);
 
   const result = {
     ...verdict,
@@ -138,6 +187,8 @@ async function main() {
           .sort()
           .at(-1) ?? null
       : null,
+    lastScheduleConclusion: lastRun?.conclusion ?? null,
+    lastScheduleRunId: lastRun?.id ?? null,
   };
 
   if (args.json) {
@@ -145,6 +196,12 @@ async function main() {
   } else if (verdict.state === "ok") {
     const hours = Math.round(verdict.ageHours ?? 0);
     console.log(`✓ 定时同步正常：最近一次 schedule 运行在 ${hours} 小时前（${args.repo} / ${args.workflow}）`);
+  } else if (verdict.state === "failed") {
+    console.error(`✗ 定时同步在跑，但最近一次失败了：${lastRun?.conclusion ?? "未知"}`);
+    console.error(`  运行：https://github.com/${args.repo}/actions/runs/${lastRun?.id ?? ""}`);
+    console.error("  常见原因：上游合并停在需要人工判断的冲突上。");
+    console.error("  处理：本地跑 node scripts/merge-upstream.mjs，解完提交推送，");
+    console.error(`  再触发一次发版：gh workflow run sync-upstream.yml --repo ${args.repo} --ref main -f force_publish=true`);
   } else if (verdict.state === "stale") {
     console.error(`✗ 定时同步已停摆：最近一次 schedule 运行是 ${Math.round(verdict.ageHours)} 小时前（阈值 ${args.staleHours} 小时）`);
     console.error("  本仓库是 fork，GitHub 会自动停用 fork 上的 workflow 来省算力。");
@@ -154,7 +211,7 @@ async function main() {
     console.error(`无法判断：${verdict.reason}`);
   }
 
-  return verdict.state === "ok" ? 0 : verdict.state === "stale" ? 1 : 2;
+  return verdict.state === "ok" ? 0 : verdict.state === "stale" ? 1 : verdict.state === "failed" ? 3 : 2;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("check-sync-watchdog.mjs")) {

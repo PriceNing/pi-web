@@ -57,3 +57,6 @@ deploy/
 
 # [fork] 合并脚本的本地报告（每次同步覆盖，不进仓库）
 .merge-upstream-report.json
+
+# [fork] 运行时会话令牌清单（测试与本地运行都会写它，不该进仓库）
+authorized_tokens.json

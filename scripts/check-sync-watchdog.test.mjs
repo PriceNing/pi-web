@@ -1,7 +1,7 @@
 // [fork] 看门狗的单元测试：纯逻辑，不碰网络。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { latestScheduledRun, evaluate } from "../scripts/check-sync-watchdog.mjs";
+import { latestScheduledRun, latestScheduledConclusion, evaluate } from "../scripts/check-sync-watchdog.mjs";
 
 const HOUR = 3_600_000;
 
@@ -88,4 +88,76 @@ test("从来没被调度过，仓库已经很旧 → 停摆", () => {
 test("一个 run 都没有 → 判断不了，而不是报停摆", () => {
   const verdict = evaluate({ latest: null, anyRunCreatedAt: null });
   assert.equal(verdict.state, "unknown");
+});
+
+// --- 2026-11-05：调度正常但 run 失败，也是断更 -------------------------
+//
+// 11-02/03/04 连着三天失败（合并停在 SettingsPanel.tsx 要人判断），
+// 而看门狗当时只问「有没有 schedule 运行」——run 一直有，于是它连着
+// 三天报「✓ 正常」。断更就这样又静默了三天。
+
+test("调度正常但最近一次 schedule 失败 → 报 failed，不是 ok", () => {
+  const now = Date.parse("2026-11-05T00:00:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-04T14:46:07Z" },
+      latestConclusion: { conclusion: "failure" },
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "failed");
+  assert.equal(verdict.reason, "schedule-run-failure");
+});
+
+test("最近一次 schedule 成功 → 仍然 ok", () => {
+  const now = Date.parse("2026-11-05T00:00:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-04T14:46:07Z" },
+      latestConclusion: { conclusion: "success" },
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "ok");
+});
+
+test("没有结论信息（老 API）→ 不误报失败", () => {
+  const now = Date.parse("2026-11-05T00:00:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-04T14:46:07Z" },
+      latestConclusion: null,
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "ok");
+});
+
+test("停摆优先于失败：很久没调度了就不再谈 run 的结论", () => {
+  const now = Date.parse("2026-11-20T00:00:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-04T14:46:07Z" },
+      latestConclusion: { conclusion: "failure" },
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "stale");
+});
+
+test("latestScheduledConclusion 只看 schedule，取最新的那条", () => {
+  const payload = {
+    workflow_runs: [
+      { event: "schedule", created_at: "2026-11-01T00:00:00Z", conclusion: "success" },
+      { event: "push", created_at: "2026-11-05T00:00:00Z", conclusion: "failure" },
+      { event: "schedule", created_at: "2026-11-03T00:00:00Z", conclusion: "failure" },
+    ],
+  };
+  const run = latestScheduledConclusion(payload);
+  assert.equal(run?.created_at, "2026-11-03T00:00:00Z");
+  assert.equal(run?.conclusion, "failure");
 });
