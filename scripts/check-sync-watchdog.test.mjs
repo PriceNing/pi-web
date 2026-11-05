@@ -1,7 +1,7 @@
 // [fork] 看门狗的单元测试：纯逻辑，不碰网络。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { latestScheduledRun, latestScheduledConclusion, evaluate } from "../scripts/check-sync-watchdog.mjs";
+import { latestScheduledRun, latestScheduledConclusion, latestSuccessfulRun, evaluate } from "../scripts/check-sync-watchdog.mjs";
 
 const HOUR = 3_600_000;
 
@@ -160,4 +160,48 @@ test("latestScheduledConclusion 只看 schedule，取最新的那条", () => {
   const run = latestScheduledConclusion(payload);
   assert.equal(run?.created_at, "2026-11-03T00:00:00Z");
   assert.equal(run?.conclusion, "failure");
+});
+
+// --- 2026-11-05 补：schedule 失败但之后手动跑成功过 → 不该再报警 ---
+
+test("schedule 失败、之后手动跑成功过 → 报 ok（问题已解决，别误报）", () => {
+  const now = Date.parse("2026-11-05T16:00:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-05T14:50:39Z" },
+      latestConclusion: { conclusion: "failure" },
+      latestSuccess: { created_at: "2026-11-05T15:15:05Z", event: "workflow_dispatch" },
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "ok");
+  assert.equal(verdict.reason, "recovered-after-failure");
+});
+
+test("schedule 失败、之后那次成功更早 → 还是报 failed", () => {
+  const now = Date.parse("2026-11-05T16:00:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-05T14:50:39Z" },
+      latestConclusion: { conclusion: "failure" },
+      latestSuccess: { created_at: "2026-11-04T14:46:07Z", event: "schedule" },
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "failed");
+});
+
+test("latestSuccessfulRun 取最近一次成功的（任何事件）", () => {
+  const payload = {
+    workflow_runs: [
+      { event: "schedule", created_at: "2026-11-01T00:00:00Z", conclusion: "success" },
+      { event: "workflow_dispatch", created_at: "2026-11-05T00:00:00Z", conclusion: "success" },
+      { event: "schedule", created_at: "2026-11-03T00:00:00Z", conclusion: "failure" },
+    ],
+  };
+  const run = latestSuccessfulRun(payload);
+  assert.equal(run?.created_at, "2026-11-05T00:00:00Z");
+  assert.equal(run?.event, "workflow_dispatch");
 });

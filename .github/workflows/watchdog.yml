@@ -156,8 +156,19 @@ jobs:
             // 调度正常，但最近一次同步**跑失败了** —— 这也是断更，而且更隐蔽：
             // run 一直有，不看 run 列表的人不会知道它每次都失败。
             // 2026-11-02/03/04 就是这样断了三天（合并停在 SettingsPanel.tsx）。
+            //
+            // 但如果在这次失败之后有人手动跑成功过（workflow_dispatch），那问题
+            // 其实已经解决过了 —— 版本也发出去了，这时不该再报警。
             const lastConclusion = latest?.conclusion ?? null;
-            if (!stale && latest && ["failure", "cancelled", "timed_out"].includes(lastConclusion)) {
+            const recovered = runs.data.workflow_runs
+              .filter((r) => r.conclusion === "success" && typeof r.created_at === "string")
+              .map((r) => ({ created_at: r.created_at, time: Date.parse(r.created_at) }))
+              .filter((r) => Number.isFinite(r.time))
+              .sort((a, b) => a.time - b.time)
+              .at(-1);
+            const recoveredAfter =
+              recovered && latest && recovered.time > Date.parse(latest.created_at) ? recovered : null;
+            if (!stale && latest && !recoveredAfter && ["failure", "cancelled", "timed_out"].includes(lastConclusion)) {
               const summary = [
                 "## ✗ 定时同步在跑，但最近一次失败了",
                 "",

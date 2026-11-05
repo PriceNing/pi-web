@@ -61,6 +61,10 @@ export function latestScheduledRun(payload) {
  * 调度正常但 run 失败，同样是断更 —— 脚本会停下等人判断，而人不会知道
  * （这个 fork 的 Issues 被禁用，脚本的 issue 告警发不出去）。
  *
+ * 但只看「最近一次 schedule」会误报：有人在 schedule 失败之后手动跑了一
+ * 次成功的（workflow_dispatch），问题其实已经解决、版本也发出去了，
+ * 最近的 schedule 仍然是失败的。所以还要看**之后有没有任何一次成功的 run**。
+ *
  * @param {{workflow_runs?: {event?: string, created_at?: string, conclusion?: string|null, status?: string|null}[]}} payload
  * @returns {{created_at: string, conclusion: string|null, status: string|null, id?: number} | null}
  */
@@ -78,6 +82,24 @@ export function latestScheduledConclusion(payload) {
     .filter((run) => Number.isFinite(run.time))
     .sort((a, b) => a.time - b.time);
   return scheduled.length > 0 ? scheduled[scheduled.length - 1] : null;
+}
+
+/**
+ * 最近一次**成功**的 run（任何事件类型）。
+ *
+ * 用来消掉「schedule 失败、但之后手动跑成功过」的误报。
+ *
+ * @param {{workflow_runs?: {event?: string, created_at?: string, conclusion?: string|null}[]}} payload
+ * @returns {{created_at: string, event?: string} | null}
+ */
+export function latestSuccessfulRun(payload) {
+  const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : [];
+  const successful = runs
+    .filter((run) => run?.conclusion === "success" && typeof run?.created_at === "string")
+    .map((run) => ({ created_at: run.created_at, event: run.event, time: Date.parse(run.created_at) }))
+    .filter((run) => Number.isFinite(run.time))
+    .sort((a, b) => a.time - b.time);
+  return successful.length > 0 ? successful[successful.length - 1] : null;
 }
 
 /**
@@ -112,6 +134,12 @@ export function evaluate(input, { staleHours = DEFAULT_STALE_HOURS } = {}) {
   // run 一直有，不看 run 列表的人不会知道它每次都失败。
   const conclusion = input.latestConclusion?.conclusion;
   if (conclusion === "failure" || conclusion === "cancelled" || conclusion === "timed_out") {
+    // 但如果在这之后有人手动跑成功过（workflow_dispatch），那问题其实已经
+    // 解决过了 —— 版本也发出去了。这时不该再报警。
+    const recovered = input.latestSuccess;
+    if (recovered && Date.parse(recovered.created_at) > Date.parse(input.latest.created_at)) {
+      return { state: "ok", reason: "recovered-after-failure", ageHours };
+    }
     return { state: "failed", reason: `schedule-run-${conclusion}`, ageHours };
   }
   return { state: "ok", reason: "recent-schedule-run", ageHours };
@@ -168,6 +196,7 @@ async function main() {
       latest: latestScheduledRun(payload),
       anyRunCreatedAt: anyRun,
       latestConclusion: latestScheduledConclusion(payload),
+      latestSuccess: latestSuccessfulRun(payload),
     },
     { staleHours: args.staleHours },
   );
@@ -195,14 +224,17 @@ async function main() {
     console.log(JSON.stringify(result));
   } else if (verdict.state === "ok") {
     const hours = Math.round(verdict.ageHours ?? 0);
-    console.log(`✓ 定时同步正常：最近一次 schedule 运行在 ${hours} 小时前（${args.repo} / ${args.workflow}）`);
+    if (verdict.reason === "recovered-after-failure") {
+      console.log(`✓ 定时同步正常：最近一次 schedule 失败过，但之后已跑成功（${args.repo} / ${args.workflow}）`);
+    } else {
+      console.log(`✓ 定时同步正常：最近一次 schedule 运行在 ${hours} 小时前（${args.repo} / ${args.workflow}）`);
+    }
   } else if (verdict.state === "failed") {
     console.error(`✗ 定时同步在跑，但最近一次失败了：${lastRun?.conclusion ?? "未知"}`);
     console.error(`  运行：https://github.com/${args.repo}/actions/runs/${lastRun?.id ?? ""}`);
     console.error("  常见原因：上游合并停在需要人工判断的冲突上。");
     console.error("  处理：本地跑 node scripts/merge-upstream.mjs，解完提交推送，");
-    console.error(`  再触发一次发版：gh workflow run sync-upstream.yml --repo ${args.repo} --ref main -f force_publish=true`);
-  } else if (verdict.state === "stale") {
+    console.error(`  再触发一次发版：gh workflow run sync-upstream.yml --repo ${args.repo} --ref main -f force_publish=true`);  } else if (verdict.state === "stale") {
     console.error(`✗ 定时同步已停摆：最近一次 schedule 运行是 ${Math.round(verdict.ageHours)} 小时前（阈值 ${args.staleHours} 小时）`);
     console.error("  本仓库是 fork，GitHub 会自动停用 fork 上的 workflow 来省算力。");
     console.error(`  恢复：打开 https://github.com/${args.repo}/actions ，点绿色按钮`);
