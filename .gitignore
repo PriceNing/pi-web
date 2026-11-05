@@ -53,6 +53,11 @@ deploy/
 
 # Windows 上部分测试会把带盘符的临时路径压扁成文件名写在仓库根，不是产物。
 # ? 同时覆盖普通冒号与全角冒号两种写法。
+#
+# 注意：Git for Windows 会把 `C:` 开头的名字当成路径前缀，所以
+# `git status` / `git ls-files --others` 仍会把它们列成未跟踪文件（显示层的
+# 毛病）。但 `git add` / `git add -A` 都不会把它们加进来（实测过），
+# 所以它们不会进仓库。仓库根看到它们是正常的，可以直接删。
 /C?UsersAdministratorAppDataLocalTemp*
 
 # [fork] 合并脚本的本地报告（每次同步覆盖，不进仓库）
