@@ -171,9 +171,26 @@ async function main() {
       signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) {
-      const message = `GitHub API 返回 HTTP ${response.status}`;
-      if (args.json) console.log(JSON.stringify({ state: "unknown", reason: message }));
-      else console.error(`无法判断：${message}`);
+      // 匿名请求的配额是 60 次/小时（GitHub 对未认证请求的硬限制）。用完了
+      // 会返回 403 rate limit exceeded —— 那是「现在查不了」，不是「同步停了」，
+      // 所以要说清楚，否则每次都会误报一次噪音。
+      const remaining = response.headers.get("x-ratelimit-remaining");
+      const isRateLimited = response.status === 403 && remaining === "0";
+      const message = isRateLimited
+        ? `GitHub API 匿名配额已用完（60 次/小时），现在查不了 —— 这不是同步停了`
+        : `GitHub API 返回 HTTP ${response.status}`;
+      if (args.json) console.log(JSON.stringify({ state: "unknown", reason: message, rateLimited: isRateLimited }));
+      else {
+        console.error(`无法判断：${message}`);
+        if (isRateLimited) {
+          const reset = Number(response.headers.get("x-ratelimit-reset") ?? 0);
+          if (reset > 0) {
+            const minutes = Math.max(1, Math.ceil((reset * 1000 - Date.now()) / 60_000));
+            console.error(`  配额大约 ${minutes} 分钟后重置。`);
+          }
+          console.error("  这个脚本一天只跑一次，正常不会撞到配额。");
+        }
+      }
       return 2;
     }
     payload = await response.json();
