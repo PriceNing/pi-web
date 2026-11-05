@@ -51,8 +51,9 @@ upstream/main ──merge──▶ origin/main  =  上游 + 本 fork 的全部�
 
 | 文件 | 职责 |
 |---|---|
-| `scripts/merge-upstream.mjs` | 策略化上游合并：方向表自动解冲突、恢复被删的面门、封存 `fork-front-doors` tag、需要人判断时开 issue |
+| `scripts/merge-upstream.mjs` | 策略化上游合并：方向表自动解冲突、恢复被删的面门、封存 `fork-front-doors` tag、需要人判断时停下并**如实告警**（本 fork 禁用 Issues，开不成） |
 | `scripts/merge-package-json.mjs` | `package.json` 结构化合成：我们的身份字段 + 上游的依赖（依赖取并集） |
+| `scripts/merge-destructuring.mjs` | 解构并集这类方向唯一的冲突由机器解（见 §6.7） |
 | `lib/session-delete-compat.ts` | 归档页的删除入口包装（住在自有文件里，让上游的 `lib/session-delete.ts` 保持逐字一致） |
 | `lib/upstream-files-untouched.test.mjs` | 逐字节对比 `upstream/main`，把「不改上游文件」变成测试 |
 | `scripts/merge-upstream.test.mjs` / `.e2e.test.mjs` / `merge-package-json.test.mjs` | 策略表、端到端合并行为、package.json 合成的测试 |
@@ -510,8 +511,9 @@ gh release edit v0.12.7 --repo PriceNing/pi-web --latest=false
 
 | 部件 | 作用 |
 |---|---|
-| `scripts/merge-upstream.mjs` | 策略化合并：方向已定的冲突自动解，方向不明的才停下并**开 issue** |
+| `scripts/merge-upstream.mjs` | 策略化合并：方向已定的冲突自动解，方向不明的才停下并**如实告警** |
 | `scripts/merge-package-json.mjs` | `package.json` 的**结构化**合成：我们的身份 + 上游的依赖 |
+| `scripts/merge-destructuring.mjs` | 解构并集这类方向唯一的冲突也由机器解（§6.7） |
 | `lib/session-delete-compat.ts` 等自有文件 | 我们的接线住在**新文件**里，上游的文件保持逐字一致 |
 
 一条命令完成本地同步：
@@ -527,7 +529,8 @@ node scripts/merge-upstream.mjs
 - `ours`：我们的门面 `README.md` / `README.zh-CN.md` / `README.ja.md` / `README.ru.md`
 - `theirs`：上游负责的 `docs/README.*.md`（上游自己的译文）、`app/api/sessions/[id]/route.ts`、`lib/session-delete.ts`、`package-lock.json`
 - `package.json`：走 `scripts/merge-package-json.mjs` 结构化合成（不是整块取一边）
-- 其余：需要人判断，脚本会开 issue 并停下
+- 其余：需要人判断，脚本会停下并**如实告警**（见 §7.10：本 fork 禁用 Issues，
+  所以它开不成 issue，会说「开不了」并把待判断的文件写进 run summary）
 
 **必须守住的纪律：不要改上游的文件。** 上游的文件一旦被我们改过，以后每次同步都会在那里冲突。要扩展就新建文件、在调用点接线；实在必须改的，登记进 `POLICY` 表。`lib/upstream-files-untouched.test.mjs` 会逐字节对比 `upstream/main`，把这条纪律变成测试。
 
@@ -575,7 +578,10 @@ node scripts/merge-upstream.mjs
 
 ```bash
 node scripts/merge-upstream.mjs
-# 退出码 2 = 有需要人判断的文件（脚本已开 issue）。解完：
+# 退出码 2 = 有需要人判断的文件。脚本会开 issue，但本 fork 禁用了 Issues，
+# 所以开不成 —— 它会**如实说开不了**，并把待判断的文件写进 run summary。
+# 退出码 0 = 全部自动解掉了（包括解构并集那类，见 6.7），不用管。
+# 解完剩下的：
 npm install            # lock 必须重新生成，不能合并（见 6.4）
 npm run lint && npx tsc --noEmit && npm test
 node scripts/set-forked-from.mjs \
@@ -586,6 +592,10 @@ git push origin main
 # CI 看到 incoming=0 会直接跳过发版。
 gh workflow run sync-upstream.yml --repo PriceNing/pi-web --ref main -f force_publish=true
 ```
+
+**怎么知道同步是不是真的停了**：别只看「有没有 run」。看门狗现在也会看结论 ——
+`node scripts/check-sync-watchdog.mjs` 的退出码 `3` 表示「调度正常但最近一次失败了」
+（详见 §7.9）。
 
 ### 6.4 `package.json` 与 `package-lock.json`
 
@@ -639,6 +649,35 @@ git merge upstream/main
 
 - **委派子代理时写死「禁止 git 写操作」**（add/commit/push、gh workflow run）。这次把一个未提交的合并留在索引里再委派，任何一次 `git commit -a` 都会顺手扫走主代理的判断成果——事实上有次发版就是这么跑在主代理前面的。
 - **`git clean -X` 会把基础设施一起吃掉**。被忽略的东西里包括 `.next/`、`node_modules/`、`tsconfig.tsbuildinfo`。只点名具体文件再删，别图省事执行整条清理。
+
+### 6.7 解构并集：机器能解的冲突就别问人（2026-11-05 加）
+
+最常见的一类「需要人判断」的冲突，其实**方向是唯一的**：
+
+```diff
+  <<<<<<< HEAD
+    const { t, locale } = useI18n();
+  =======
+    const { t, newFeature } = useI18n();
+  >>>>>>> theirs
+```
+
+两边各往同一个解构里加了一项，结果就是**并集**。这种冲突由 `scripts/merge-destructuring.mjs`
+自动解，脚本在策略表**之前**先试这一手。
+
+它的边界（越界的绝不猜，一律交回给人）：
+
+- 只处理**双方改的是同一个解构声明**这一种形状；
+- 用**三方**（base/ours/theirs）判断「新增」与「删除」—— 只有共同祖先能区分这两者；
+- 一侧带注释行时保留注释（我们的注释解释的是我们为什么要 `locale`）；
+- 行尾容忍 **CRLF**：本地是 Windows，工作区是 CRLF，用 `\n` 结尾的正则在 CRLF 文件上
+  一个块都匹配不到 —— 明明能解的冲突也会被判成「要人判断」；
+- 整个文件必须**全是**这种形状才自动解；只要有一块不是，整个文件交回给人（绝不半解半留）。
+
+**能自动解的前提是我们的接线足够少**。`components/SettingsPanel.tsx` 曾经同时含着我们
+5 行的常量定义和上游 83 行的新代码，冲突块 88 行；把常量搬进 fork 自有的
+`components/ArchivesConfig.tsx` 之后，冲突块缩到 1 行 —— 而 1 行是机器能解的形状。
+**接线外移不只是为了少冲突，也是为了让剩下的冲突可自动化。**
 
 ---
 
@@ -968,6 +1007,45 @@ run 的 summary —— 谁打开 Actions 都能看见。
 workflow 版照着同一套写）。特别是「从来没被调度过」**不等于**停摆 —— 刚建好的仓库当然
 还没有 schedule 运行，所以要看「这个仓库最早的 run 也有多旧」。
 
+### 7.9 调度正常但 run 失败：另一种断更，看门狗原先看不见（2026-11-05 实测）
+
+**症状**：定时同步每天都在跑（`event=schedule` 的 run 一个不少），但**每天都是 failure**，
+于是上游的更新一直合不进来 —— 而从「有没有 run」这一层看，**一切正常**。
+
+2026-11-02/03/04/05 连着四天就是这样断的。根因是三层叠加：
+
+| 层 | 问题 | 现状 |
+| --- | --- | --- |
+| 冲突本身 | 一个 **1 行**的冲突（双方各往同一个解构里加了一项）也要人来判断 | 已根治：解构并集由机器解（见 §6.7） |
+| 告警通道 | 脚本「开 issue」失败被 `catch` 吞掉，还打印「已开 issue」——**撒谎** | 已修：如实报告开成了还是开不成，并把待判断的文件写进 run summary |
+| 看门狗盲区 | 只问「有没有 schedule 运行」，run 一直失败它也报「✓ 正常」 | 已修：也看最近一次 schedule 的**结论** |
+
+**现在看门狗多了一种状态**：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 调度正常，且最近一次跑成功了 |
+| `1` | 停摆（超过阈值没有 schedule 运行） |
+| `2` | 判断不了（网络、仓库不存在、API 变了） |
+| `3` | **调度正常但最近一次 run 失败**（合并卡住等人判断） |
+
+workflow 版看门狗同样会在这种时候**让 run 失败**并写明是哪一次 run、为什么。
+
+**教训**：「有没有在跑」和「跑得对不对」是两件事。只查前者的看门狗，会在最需要它的时候
+给出「一切正常」的假安慰。
+
+### 7.10 告警一定要有真实送达的通道（本 fork 的教训）
+
+本 fork 的 **Issues 和 Discussions 都被禁用**（`has_issues: false`）。所以：
+
+- `gh issue create` **必然失败** —— 任何依赖它的告警都是空转；
+- 脚本**不能**在失败后还打印「已开 issue」——那会让人以为已经通知到了；
+- 可靠的通道只有这几个：**run 的失败状态**、**run 的 summary**、以及机器侧的脚本
+  （退出码非 0 就是信号）。
+
+新增告警通道时，先确认它在**本仓库**真的能用（`has_issues` 为 false 就别用 issue），
+并让失败路径**如实说话**。
+
 
 
 
@@ -1140,8 +1218,9 @@ Windows 本机跑 `npm test` 已不再是“只差 2 个”：上游 v0.10.0 那
 
 你需要**主动看一眼**的三种情况：
 
-1. **CI 变红（合并需要人判断）**：脚本已自动解开方向已定的冲突，剩下的会在仓库里开一个
-   issue 列出需要人判断的文件。按 §6.3 本地跑 `node scripts/merge-upstream.mjs` 处理。
+1. **CI 变红（合并需要人判断）**：脚本已自动解开方向已定的冲突（包括解构并集那类），
+   剩下的会列在**这次 run 的 summary** 里（见 §7.10 —— 本 fork 禁用 Issues，脚本开不成
+   issue，会如实说明）。按 §6.3 本地跑 `node scripts/merge-upstream.mjs` 处理。
    特别注意：若冲突在 `package.json`，**不要整块取一边**——用 `scripts/merge-package-json.mjs`
    的结构化合成（我们的身份 + 上游的依赖）；`forkedFrom` 由 CI 自动写。
 2. **上游自己实现了 pin / 收藏**（维护者多次提到要"重新设计会话组织"）：**立刻停用我们的补丁**，
