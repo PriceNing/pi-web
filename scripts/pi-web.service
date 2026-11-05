@@ -1,0 +1,39 @@
+# [pin-fork] Linux 部署模板：systemd **用户级**服务。
+#
+# 用法（作为普通用户，不要 sudo）：
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/pi-web.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pi-web
+#   loginctl enable-linger $USER        # 关键：未登录也开机自启
+#
+# 与 Windows 的差别（实测）：Linux 不需要 launcher 脚本。systemd 只负责"跑起来"，
+# 不会自动 npm update，所以版本天然是锁住的 —— 升级要显式执行：
+#   npm i -g @pricening/pi-web@<版本> --registry=https://registry.npmjs.org/
+#   systemctl --user restart pi-web
+# 卸载/安装时注意共享的 pi-web 链接坑，见 docs/FORK.md §7.1。
+
+[Unit]
+Description=pi-web (fork build) - Web UI for the pi coding agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 用 npm 全局 bin 的链接，而不是包内绝对路径：升级/重装时链接目标会变，unit 不用改。
+ExecStart=%h/.npm-global/bin/pi-web -H 0.0.0.0
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+# npm 全局 bin 与 node 都要能找到；按需调整 node 路径。
+Environment=PATH=%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+# 可选：开启登录鉴权（纯内网可不设）。也可改用 EnvironmentFile=%h/.config/pi-web/env
+# Environment=PI_WEB_PASSWORD=change-me
+# 只监听回环的话把上面的 -H 改成 -H 127.0.0.1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pi-web
+
+[Install]
+WantedBy=default.target

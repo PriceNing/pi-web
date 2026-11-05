@@ -1,0 +1,67 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/test-results/
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+/.agents/
+/skills-lock.json
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+.factory
+e2e_*.mjs
+
+# [pin-fork] 私有部署清单永不入库（本仓库是公开的）
+*.local.md
+*.local.json
+deploy/
+
+# Windows 上部分测试会把带盘符的临时路径压扁成文件名写在仓库根，不是产物。
+# ? 同时覆盖普通冒号与全角冒号两种写法。
+#
+# 注意：Git for Windows 会把 `C:` 开头的名字当成路径前缀，所以
+# `git status` / `git ls-files --others` 仍会把它们列成未跟踪文件（显示层的
+# 毛病）。但 `git add` / `git add -A` 都不会把它们加进来（实测过），
+# 所以它们不会进仓库。仓库根看到它们是正常的，可以直接删。
+/C?UsersAdministratorAppDataLocalTemp*
+
+# [fork] 合并脚本的本地报告（每次同步覆盖，不进仓库）
+.merge-upstream-report.json
+
+# [fork] 运行时会话令牌清单（测试与本地运行都会写它，不该进仓库）
+authorized_tokens.json
