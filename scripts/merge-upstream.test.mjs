@@ -57,6 +57,34 @@ test("publish.yml 刻意不监听 tag：否则会和日常发版抢同一个版�
   assert.doesNotMatch(publish, /^on:\s*\n\s*push:/m);
 });
 
+test("合并脚本自己被钉住：上游删掉它，fork 的同步就瘫了", () => {
+  // 这些脚本是 fork 的合并流水线本体。上游不可能有同名文件，但一旦哪天
+  // 有了同名文件而我们没钉住，一次合并就会让同步脚本消失 —— 而 CI 里
+  // 「脚本不存在」表现为找不到文件，很难一眼看出是合并吃掉了它。
+  for (const file of [
+    "scripts/merge-upstream.mjs",
+    "scripts/merge-package-json.mjs",
+    "scripts/merge-destructuring.mjs",
+    "scripts/check-sync-watchdog.mjs",
+  ]) {
+    assert.ok(MUST_KEEP.includes(file), `${file} 不在 MUST_KEEP 里`);
+  }
+});
+
+test("合并脚本用了「解构并集」这个自动解法", () => {
+  // 2026-11-05：上游 v0.15.0 与我们的归档页接线在同一个解构上撞车，
+  // 连着四天要人来判断。有了这个自动解法，同类冲突由机器解。
+  assert.match(script, /resolveDestructuringConflicts/);
+  assert.match(script, /tryMergeDestructuring/);
+});
+
+test("issue 开不了时必须如实说，不能谎报「已开 issue」", () => {
+  // 这个 fork 的 Issues 是禁用的，gh issue create 必然失败。之前脚本把
+  // 失败吞掉还打印「已开 issue」，于是 11-02/03/04 连着三天断更而无人知晓。
+  assert.match(script, /return false;/);
+  assert.match(script, /开不了 issue/);
+});
+
 test("MUST_KEEP 里的文件都真实存在", () => {
   for (const file of MUST_KEEP) {
     assert.ok(existsSync(new URL(`../${file}`, import.meta.url)), `${file} 不存在`);

@@ -24,6 +24,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mergePackageJson } from "./merge-package-json.mjs";
+import { resolveDestructuringConflicts } from "./merge-destructuring.mjs";
 
 const ROOT = process.cwd();
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -87,6 +88,13 @@ export const MUST_KEEP = [
   // 而删掉之后 GitHub 不会报错，只是定时任务再也不跑，非常难发现。
   ".github/workflows/sync-upstream.yml",
   ".github/workflows/publish.yml",
+  // 合并流水线与看门狗的脚本本体。它们是 fork 自己的东西，上游不会有
+  // 同名文件 —— 但一旦有了而我们没钉住，一次合并就会让同步脚本消失，
+  // 而「脚本不见了」在 CI 里表现为找不到文件，很难一眼看出是合并吃掉的。
+  "scripts/merge-upstream.mjs",
+  "scripts/merge-package-json.mjs",
+  "scripts/merge-destructuring.mjs",
+  "scripts/check-sync-watchdog.mjs",
 ];
 
 /**
@@ -140,6 +148,45 @@ export function conflictedFiles(cwd = ROOT) {
 }
 
 /**
+ * 尝试用「解构并集」自动解一个冲突文件。
+ *
+ * 2026-11-05 实测的冲突形状（上游 v0.15.0 vs 我们的归档页接线）：
+ *
+ *   <<<<<<< HEAD
+ *     const { t, locale } = useI18n();
+ *   =======
+ *     const { t, newFeature } = useI18n();
+ *   >>>>>>> theirs
+ *
+ * 方向唯一：两边各自往同一个解构里加了一项，结果就是并集。所以它该由机器解，
+ * 而不是每次都停下来等人。把接线挪进 fork 自有文件之后，这类冲突从 88 行
+ * 缩到了 1 行 —— 但只要还在同一个文件里，上游再动这一行就会撞一次。
+ *
+ * 只有当**整个文件**的冲突都是这种形状时才自动解；只要有一块不是，就整个
+ * 文件交回给人（绝不半解半留）。
+ *
+ * @returns {{ok: true} | {ok: false}}
+ */
+function tryMergeDestructuring(file, git, cwd) {
+  const ours = git.safe(["show", `:2:${file}`]);
+  const theirs = git.safe(["show", `:3:${file}`]);
+  const base = git.safe(["show", `:1:${file}`]);
+  if (!ours.ok || !theirs.ok || !base.ok) return { ok: false };
+
+  // 先看工作区里那个带冲突标记的版本（git 已经把双方合在一起了）。
+  const conflicted = readFileSync(join(cwd, file), "utf8");
+  if (!/^<<<<<<< /m.test(conflicted)) return { ok: false };
+
+  const result = resolveDestructuringConflicts(conflicted, base.out);
+  if (!result) return { ok: false };
+  if (/^<<<<<<< /m.test(result.text)) return { ok: false };
+
+  writeFileSync(join(cwd, file), result.text, "utf8");
+  git.run(["add", "--", file]);
+  return { ok: true };
+}
+
+/**
  * 按策略解决冲突，返回 { resolved, manual }。
  * resolved：策略定死的文件；manual：需要人判断的文件。
  */
@@ -167,6 +214,11 @@ export function resolveByPolicy(files, { cwd = ROOT, policy = POLICY, dryRun = f
       );
       writeFileSync(join(cwd, "package.json"), `${JSON.stringify(merged, null, 2)}\n`, "utf8");
       git.run(["add", "--", file]);
+      resolved.push(file);
+      continue;
+    }
+    // 解构并集：双方只往同一个解构里各加了一项 —— 方向唯一，机器能解。
+    if (!dryRun && tryMergeDestructuring(file, git, cwd).ok) {
       resolved.push(file);
       continue;
     }

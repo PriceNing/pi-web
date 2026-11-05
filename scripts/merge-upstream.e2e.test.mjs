@@ -167,3 +167,42 @@ test("情形五：上游改名搬走门面时，门面照样恢复", () => {
   assert.ok(existsSync(join(fork, "README.zh-CN.md")), "我们的门面应恢复");
   assert.match(readFileSync(join(fork, "README.zh-CN.md"), "utf8"), /我们的中文门面/);
 });
+
+test("情形八：双方往同一个解构里各加一项 → 机器自动解，不停下来问人", () => {
+  // 2026-11-05 的真实冲突（上游 v0.15.0 vs 我们的归档页接线）：
+  //   <<<<<<< HEAD
+  //     const { t, locale } = useI18n();
+  //   =======
+  //     const { t, newFeature } = useI18n();
+  //   >>>>>>> theirs
+  // 方向唯一（取并集），所以该由机器解。连着四天要人来判断，才让同步停了四天。
+  const { fork, upstream } = makeRepos();
+  const panel = join(fork, "components");
+  mkdirSync(panel, { recursive: true });
+  writeFileSync(join(panel, "SettingsPanel.tsx"), "  const { t } = useI18n();\n", "utf8");
+  git(fork, ["add", "-A"]);
+  git(fork, ["commit", "-m", "fork adds the panel"]);
+
+  // 上游从 fork 的这个提交出发（所以双方有共同祖先，合并时能查到 base），
+  // 然后两边各改一行 —— 这就是真实场景。
+  git(upstream, ["fetch", fork, "main"]);
+  git(upstream, ["checkout", "-B", "main", "FETCH_HEAD"]);
+  // 上游的那一版：多一个 newFeature
+  mkdirSync(join(upstream, "components"), { recursive: true });
+  writeFileSync(join(upstream, "components", "SettingsPanel.tsx"), "  const { t, newFeature } = useI18n();\n", "utf8");
+  git(upstream, ["add", "-A"]);
+  git(upstream, ["commit", "-m", "upstream adds newFeature"]);
+
+  // 我们的那一版：多一个 locale
+  writeFileSync(join(fork, "components", "SettingsPanel.tsx"), "  const { t, locale } = useI18n();\n", "utf8");
+  git(fork, ["add", "-A"]);
+  git(fork, ["commit", "-m", "fork adds locale"]);
+
+  git(fork, ["fetch", "upstream", "main"]);
+  const result = syncUpstream({ cwd: fork, fetchOrigin: false });
+  assert.equal(result.ok, true, `应当自动解: ${result.notes.join("; ")}`);
+  assert.deepEqual(result.manual, [], "不该留下要人判断的文件");
+  assert.equal(conflictedFiles(fork).length, 0, "不应残留冲突");
+  const merged = readFileSync(join(fork, "components", "SettingsPanel.tsx"), "utf8");
+  assert.match(merged, /const \{ t, locale, newFeature \} = useI18n\(\);/, `应取并集: ${merged}`);
+});
