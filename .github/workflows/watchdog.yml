@@ -82,6 +82,27 @@ jobs:
             const latest = scheduled[scheduled.length - 1];
             const now = Date.now();
 
+            // 阈值随**实际调度间隔**走，而不是写死（2026-11-06 加）。
+            //
+            // 本仓库的同步频率从每日一次改成了每 6 小时一次：写死 48 小时的话，
+            // 8 次连续失败都发现不了；而每 6 小时一次的话，16 小时没跑就已经
+            // 不对劲了。所以从历史 run 的间隔推断出真实节奏，再按它算阈值。
+            const times = scheduled.map((r) => r.time).sort((a, b) => b - a);
+            const gaps = [];
+            for (let i = 0; i < Math.min(times.length, 12) - 1; i++) {
+              const gap = (times[i] - times[i + 1]) / 3600000;
+              if (gap > 0) gaps.push(gap);
+            }
+            gaps.sort((a, b) => a - b);
+            let intervalHours = null;
+            if (gaps.length > 0) {
+              const mid = Math.floor(gaps.length / 2);
+              intervalHours = gaps.length % 2 === 1 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2;
+            }
+            const effectiveStale = intervalHours !== null
+              ? Math.min(72, Math.max(18, intervalHours * 2 + 6))
+              : staleHours;
+
             // 判断分支和 scripts/check-sync-watchdog.mjs 保持一致：
             // 从来没被调度过 ≠ 停摆 —— 刚建好的仓库当然还没有 schedule 运行。
             // 所以要看「这个仓库最早的 run 也有多旧」。
@@ -97,7 +118,7 @@ jobs:
                 .sort()
                 .at(-1);
               const anyAge = anyRun ? (now - Date.parse(anyRun)) / 3600000 : Infinity;
-              if (anyAge > staleHours) {
+              if (anyAge > effectiveStale) {
                 stale = true;
                 ageHours = anyAge;
                 reason = "从来没有被定时调度过";
@@ -107,7 +128,7 @@ jobs:
             } else {
               ageHours = (now - Date.parse(latest.created_at)) / 3600000;
               lastScheduleAt = latest.created_at;
-              if (ageHours > staleHours) {
+              if (ageHours >= effectiveStale) {
                 stale = true;
                 reason = "超过阈值没有新的 schedule 运行";
               }
@@ -138,7 +159,7 @@ jobs:
               const summary = [
                 "## ✗ 定时同步已停摆",
                 "",
-                `\`${workflow}\` 的最近一次 schedule 运行是 **${Math.round(ageHours)} 小时前**（阈值 ${staleHours} 小时）。`,
+                `\`${workflow}\` 的最近一次 schedule 运行是 **${Math.round(ageHours)} 小时前**（阈值 ${Math.round(effectiveStale)} 小时）。`,
                 reason,
                 "",
                 lastScheduleAt ? `最后一次 schedule 运行时间：\`${lastScheduleAt}\`` : "",
@@ -149,7 +170,7 @@ jobs:
                 restoreHint,
               ].filter((line) => line !== "").join("\n");
               await core.summary.addRaw(summary).write();
-              core.setFailed(`定时同步已停摆：最近一次 schedule 运行是 ${Math.round(ageHours)} 小时前（阈值 ${staleHours} 小时）`);
+              core.setFailed(`定时同步已停摆：最近一次 schedule 运行是 ${Math.round(ageHours)} 小时前（阈值 ${Math.round(effectiveStale)} 小时）`);
               return;
             }
 
@@ -173,7 +194,7 @@ jobs:
                 "## ✗ 定时同步在跑，但最近一次失败了",
                 "",
                 `最近一次 schedule 运行：\`${latest.created_at}\`（结论：**${lastConclusion}**）`,
-                `距今 ${Math.round(ageHours)} 小时（阈值 ${staleHours} 小时）。`,
+                `距今 ${Math.round(ageHours)} 小时（阈值 ${Math.round(effectiveStale)} 小时）。`,
                 "",
                 "调度是正常的，但那次同步**没有成功** —— 最常见的原因是上游合并停在",
                 "了需要人工判断的冲突上（脚本会停下，等人处理）。",
@@ -202,7 +223,7 @@ jobs:
               "## ✓ 定时同步正常",
               "",
               `最近一次 schedule 运行：${lastScheduleAt ?? "（还没有过）"}`,
-              ageHours === null ? "" : `距今 ${Math.round(ageHours)} 小时（阈值 ${staleHours} 小时）。`,
+              ageHours === null ? "" : `距今 ${Math.round(ageHours)} 小时（阈值 ${Math.round(effectiveStale)} 小时）。`,
               "",
               reason && !lastScheduleAt ? reason : "",
             ].filter((line) => line !== "").join("\n");

@@ -35,6 +35,39 @@ const DEFAULT_REPO = "PriceNing/pi-web";
 const DEFAULT_WORKFLOW = "sync-upstream.yml";
 const DEFAULT_STALE_HOURS = 48;
 
+/**
+ * 从历史 run 里推断这个 workflow 的**实际调度间隔**（小时）。
+ *
+ * 为什么不用写死的阈值：调度频率变了，阈值就该跟着变。
+ * 2026-11-06 实测本仓库从每日一次（"30 6 * * *"）改成每 6 小时一次
+ * （每 6 小时触发一次，分数用 47 以错开 watchdog 的 17）—— 写死 48 小时的话，
+ * 8 次连续失败都发现不了；而每 6 小时一次的话，16 小时没跑就已经不对劲了。
+ *
+ * 取最近若干次 schedule run 的间隔中位数，避免单次抖动带偏。
+ *
+ * @param {{workflow_runs?: {event?: string, created_at?: string}[]}} payload
+ * @returns {number | null} 推断的小时数；数据不足时返回 null
+ */
+export function inferScheduleIntervalHours(payload) {
+  const runs = Array.isArray(payload?.workflow_runs) ? payload.workflow_runs : [];
+  const times = runs
+    .filter((run) => run?.event === "schedule" && typeof run?.created_at === "string")
+    .map((run) => Date.parse(run.created_at))
+    .filter((time) => Number.isFinite(time))
+    .sort((a, b) => b - a);
+  if (times.length < 3) return null;
+  const gaps = [];
+  for (let i = 0; i < Math.min(times.length, 12) - 1; i++) {
+    const gap = (times[i] - times[i + 1]) / 3_600_000;
+    if (gap > 0) gaps.push(gap);
+  }
+  if (gaps.length === 0) return null;
+  gaps.sort((a, b) => a - b);
+  const middle = Math.floor(gaps.length / 2);
+  const median = gaps.length % 2 === 1 ? gaps[middle] : (gaps[middle - 1] + gaps[middle]) / 2;
+  return median;
+}
+
 /** 匿名访问公开仓库的 run 列表 —— 不需要 token。 */
 function buildRunsUrl(repo, workflow) {
   return `https://api.github.com/repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=50`;
@@ -105,16 +138,24 @@ export function latestSuccessfulRun(payload) {
 /**
  * 判断这次检查的结论。
  *
- * 三种断更形态：
+ * 四种断更形态：
  *   1. 调度停了（fork 被自动停用 workflow）→ stale
  *   2. 调度正常，但最近一次 run 失败 → failed（合并卡住等人判断）
  *   3. 一切正常 → ok
  *
- * @param {{latest: {created_at: string}|null, anyRunCreatedAt?: string|null, latestConclusion?: {conclusion?: string|null}|null, now?: number}} input
- * @param {{staleHours: number}} options
+ * 阈值随**实际调度频率**走：间隔越长，能容忍的空白越大。
+ *
+ * @param {{latest: {created_at: string}|null, anyRunCreatedAt?: string|null, latestConclusion?: {conclusion?: string|null}|null, latestSuccess?: {created_at: string}|null, intervalHours?: number|null, now?: number}} input
+ * @param {{staleHours: number, minStaleHours?: number, maxStaleHours?: number}} options
  */
-export function evaluate(input, { staleHours = DEFAULT_STALE_HOURS } = {}) {
+export function evaluate(input, { staleHours = DEFAULT_STALE_HOURS, minStaleHours = 18, maxStaleHours = 72 } = {}) {
   const now = input.now ?? Date.now();
+  // 实际间隔比阈值短 → 用更紧的阈值（每 6 小时一次的 cron，16 小时没跑
+  // 就已经不对劲了）；实际间隔比阈值长 → 放宽（每日一次时 48 小时合理）。
+  let effectiveStale = staleHours;
+  if (typeof input.intervalHours === "number" && Number.isFinite(input.intervalHours)) {
+    effectiveStale = Math.min(maxStaleHours, Math.max(minStaleHours, input.intervalHours * 2 + 6));
+  }
   if (!input.latest) {
     // 从来没被调度过。只在「仓库本身很旧」时才判定为停摆 ——
     // 刚建好的仓库当然还没有 schedule 运行。
@@ -123,13 +164,15 @@ export function evaluate(input, { staleHours = DEFAULT_STALE_HOURS } = {}) {
       return { state: "unknown", reason: "no-runs-at-all", ageHours: null };
     }
     const ageHours = (now - any) / 3_600_000;
-    if (ageHours <= staleHours) {
+    if (ageHours <= effectiveStale) {
       return { state: "ok", reason: "too-new-for-schedule", ageHours };
     }
     return { state: "stale", reason: "never-scheduled", ageHours };
   }
   const ageHours = (now - Date.parse(input.latest.created_at)) / 3_600_000;
-  if (ageHours > staleHours) return { state: "stale", reason: "no-schedule-run", ageHours };
+  // >= 而不是 >：刚好错过一个周期就算停摆（每 6 小时一次、容忍 18 小时，
+  // 那么第三次该跑的时刻到了却没跑，就该报了）。
+  if (ageHours >= effectiveStale) return { state: "stale", reason: "no-schedule-run", ageHours };
   // 调度正常，但最近一次同步失败了 —— 也是断更，而且更隐蔽：
   // run 一直有，不看 run 列表的人不会知道它每次都失败。
   const conclusion = input.latestConclusion?.conclusion;
@@ -214,6 +257,7 @@ async function main() {
       anyRunCreatedAt: anyRun,
       latestConclusion: latestScheduledConclusion(payload),
       latestSuccess: latestSuccessfulRun(payload),
+      intervalHours: inferScheduleIntervalHours(payload),
     },
     { staleHours: args.staleHours },
   );
@@ -225,6 +269,7 @@ async function main() {
     repo: args.repo,
     workflow: args.workflow,
     staleHours: args.staleHours,
+    scheduleIntervalHours: inferScheduleIntervalHours(payload) ?? null,
     latestScheduledRun: verdict.ageHours === null ? null : undefined,
     lastScheduleAt: verdict.reason === "no-schedule-run" || verdict.reason === "never-scheduled"
       ? (payload.workflow_runs ?? [])
@@ -237,6 +282,12 @@ async function main() {
     lastScheduleRunId: lastRun?.id ?? null,
   };
 
+  const interval = inferScheduleIntervalHours(payload);
+  // 实际用的阈值：间隔推断出来时按间隔算，否则用命令行给的。
+  const effectiveStale = typeof interval === "number" && Number.isFinite(interval)
+    ? Math.min(72, Math.max(18, interval * 2 + 6))
+    : args.staleHours;
+
   if (args.json) {
     console.log(JSON.stringify(result));
   } else if (verdict.state === "ok") {
@@ -246,13 +297,17 @@ async function main() {
     } else {
       console.log(`✓ 定时同步正常：最近一次 schedule 运行在 ${hours} 小时前（${args.repo} / ${args.workflow}）`);
     }
+    if (interval) {
+      console.log(`  实际调度间隔约 ${Math.round(interval)} 小时，停摆阈值 ${Math.round(effectiveStale)} 小时`);
+    }
   } else if (verdict.state === "failed") {
     console.error(`✗ 定时同步在跑，但最近一次失败了：${lastRun?.conclusion ?? "未知"}`);
     console.error(`  运行：https://github.com/${args.repo}/actions/runs/${lastRun?.id ?? ""}`);
     console.error("  常见原因：上游合并停在需要人工判断的冲突上。");
     console.error("  处理：本地跑 node scripts/merge-upstream.mjs，解完提交推送，");
-    console.error(`  再触发一次发版：gh workflow run sync-upstream.yml --repo ${args.repo} --ref main -f force_publish=true`);  } else if (verdict.state === "stale") {
-    console.error(`✗ 定时同步已停摆：最近一次 schedule 运行是 ${Math.round(verdict.ageHours)} 小时前（阈值 ${args.staleHours} 小时）`);
+    console.error(`  再触发一次发版：gh workflow run sync-upstream.yml --repo ${args.repo} --ref main -f force_publish=true`);
+  } else if (verdict.state === "stale") {
+    console.error(`✗ 定时同步已停摆：最近一次 schedule 运行是 ${Math.round(verdict.ageHours)} 小时前（阈值 ${Math.round(effectiveStale)} 小时）`);
     console.error("  本仓库是 fork，GitHub 会自动停用 fork 上的 workflow 来省算力。");
     console.error(`  恢复：打开 https://github.com/${args.repo}/actions ，点绿色按钮`);
     console.error('  "I understand my workflows, go ahead and re-enable them"。');

@@ -1,7 +1,7 @@
 // [fork] 看门狗的单元测试：纯逻辑，不碰网络。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { latestScheduledRun, latestScheduledConclusion, latestSuccessfulRun, evaluate } from "../scripts/check-sync-watchdog.mjs";
+import { latestScheduledRun, latestScheduledConclusion, latestSuccessfulRun, inferScheduleIntervalHours, evaluate } from "../scripts/check-sync-watchdog.mjs";
 
 const HOUR = 3_600_000;
 
@@ -204,4 +204,68 @@ test("latestSuccessfulRun 取最近一次成功的（任何事件）", () => {
   const run = latestSuccessfulRun(payload);
   assert.equal(run?.created_at, "2026-11-05T00:00:00Z");
   assert.equal(run?.event, "workflow_dispatch");
+});
+
+// --- 2026-11-06：阈值跟着实际调度频率走 ---
+//
+// 本仓库的同步从每日一次改成每 6 小时一次。写死 48 小时的话，8 次连续失败
+// 都发现不了；而每 6 小时一次的话，16 小时没跑就已经不对劲。
+// （注意：注释里别写 "*/6"，它会提前结束这个块注释。）
+
+test("能从历史 run 推断出实际调度间隔", () => {
+  const payload = {
+    workflow_runs: [
+      { event: "schedule", created_at: "2026-11-06T06:47:00Z" },
+      { event: "schedule", created_at: "2026-11-06T00:47:00Z" },
+      { event: "schedule", created_at: "2026-11-05T18:47:00Z" },
+      { event: "schedule", created_at: "2026-11-05T12:47:00Z" },
+    ],
+  };
+  assert.equal(inferScheduleIntervalHours(payload), 6);
+});
+
+test("数据不足时推断不出间隔", () => {
+  assert.equal(inferScheduleIntervalHours({ workflow_runs: [] }), null);
+  assert.equal(inferScheduleIntervalHours({
+    workflow_runs: [{ event: "schedule", created_at: "2026-11-06T06:47:00Z" }],
+  }), null);
+});
+
+test("每 6 小时一次：18 小时没跑就报停摆（写死的 48 小时会漏掉）", () => {
+  const now = Date.parse("2026-11-06T06:47:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-05T12:47:00Z" },
+      intervalHours: 6,
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "stale");
+});
+
+test("每 6 小时一次：6 小时前刚跑过 → 正常", () => {
+  const now = Date.parse("2026-11-06T06:47:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-06T00:47:00Z" },
+      intervalHours: 6,
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "ok");
+});
+
+test("每日一次：阈值仍然宽（48 小时内没跑不算停摆）", () => {
+  const now = Date.parse("2026-11-06T06:30:00Z");
+  const verdict = evaluate(
+    {
+      latest: { created_at: "2026-11-04T14:46:07Z" },
+      intervalHours: 24,
+      now,
+    },
+    { staleHours: 48 },
+  );
+  assert.equal(verdict.state, "ok");
 });
