@@ -1194,7 +1194,7 @@ pin / archive 数据落在 `~/.pi/agent/pi-web/{pins,archives}.json`：备份/�
 | CI 发版 | **Trusted Publishing (OIDC)** —— 唯一通道 | 无 secret、无过期、带 provenance。已在 v0.9.6 实测（仓库 secrets 为空仍发布成功） |
 | 本机应急发布 | **web login**：`npm login --registry=https://registry.npmjs.org/ --auth-type=web` | 2FA 走交互（通行密钥），不绕过。注意本机 `~/.npmrc` 若指向只读镜像，必须显式带 `--registry` |
 | CI 兜底 token | **当前不存在**（已删除并 revoke） | 重建见 §5.1「历史：如何破冰」 |
-| 改 dist-tag（删 `next` 等） | **需要 npmjs.com 的 automation token** | OIDC 做不到（见下面第 4 条） |
+| 改 dist-tag（删 `next` 等） | **OIDC**（包设置里勾了 Allow npm dist-tag 后） | 2026-11-18 起可用，见 §9.2；此前的结论见下面第 4 条 |
 
 四条实测出来的硬约束（别凭直觉配置）：
 
@@ -1206,9 +1206,10 @@ pin / archive 数据落在 `~/.pi/agent/pi-web/{pins,archives}.json`：备份/�
    因此灰度不能设计成"CI 发 `next`、人工提升 `latest`"（提升这步没人能做），只能放在安装层（§5.3）。
 3. **Node 22 自带 npm 10.x 不支持 OIDC**，`npm publish --provenance` 报 `ENEEDAUTH`，与"没配好
    trusted publisher"现象相同。CI 里必须先 `npm install -g npm@11`。
-4. **Trusted Publishing 不包含 dist-tag 写权限**（2026-10-19 实测）：
+4. **Trusted Publishing 默认不包含 dist-tag 写权限**（2026-10-19 实测）：
    `npm dist-tag rm` 在 OIDC 下返回 `401 Unauthorized - PUT .../dist-tags/next`。
-   npm 的授权范围只有 `publish`。所以「让 CI 顺手把陈旧的 `next` 标签删掉」在 OIDC 下做不成。
+   npm 的授权范围只有 `publish`。**但这是默认值，不是硬限制**：包设置里给
+   trusted publisher 勾上 "Allow npm dist-tag" 后 OIDC 就能管 tag（2026-11-18 实测，见 §9.2）。
 
 ### 9.1 陈旧 dist-tag：删不掉，就改指（2026-10-30 实测定论）
 
@@ -1247,6 +1248,28 @@ workflow 的清理步骤现在的顺序是：**先试删除**（将来若换成�
 
 2026-10-30 实测（从 `next=0.9.1` 这个坏状态出发）：DELETE 返回 403，改指成功，
 `next` 现在指向 0.12.8。
+
+### 9.2 转折：OIDC 现在能管 dist-tag 了（2026-11-18 实测）
+
+上面 §9 / §9.1 的结论是**默认配置下**的实测，仍然成立作为历史；但包设置里有一个
+开关能改变它：npmjs.com → 包 Settings → Trusted Publishers → 给发布用的 workflow
+勾上 **"Allow npm dist-tag"**。维护者勾上之后：
+
+- **OIDC 直接 DELETE 成功**：run `44318687686` 里 `npm dist-tag rm ... next` 一次通过，
+  日志「✅ 已用 OIDC 清理 next 标签」，`next` 标签已不存在。
+- **新版 npm 在 OIDC 环境里优先用 trusted publisher 身份**：同一 run 的前一次尝试
+  （勾选前）里，即使把 NPM_TOKEN 写进 `~/.npmrc`，DELETE/PUT 仍报
+  `This trusted publisher cannot manage dist-tags` —— 用的是 OIDC 身份，不是 token。
+  所以 workflow 里的 NPM_TOKEN 兑底分支实际上永远不会被用到。
+- **npm 正在收紧 bypass-2FA token**（日志里的官方通知：
+  `npm tokens that bypass 2FA are being restricted for account changes and direct publishing`）。
+
+**推论**：发布（OIDC）和 dist-tag（OIDC + 勾选）都不再需要 NPM_TOKEN。
+曾经暴露过的那个 token **直接 revoke 即可，不必重建**；仓库的 NPM_TOKEN secret
+也可以删掉（workflow 里的兑底分支留着无害，只是死代码）。
+
+**残留**：`testtag=0.12.8` 还在（早年权限实验的遗留）。workflow 只管 `next`；
+它指向的版本不旧，无安装危害。要清的话现在 OIDC 能删，加一行清理即可。
 
 > 还有个 `testtag`（探测权限时留下的）删不掉，但它指向 0.12.8（正确版本），**无实际危害**，
 > 只是多一个标签名。将来若签发了不带 bypass 2FA 的 token，一并清掉即可。

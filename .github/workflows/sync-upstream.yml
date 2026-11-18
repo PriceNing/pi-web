@@ -352,20 +352,22 @@ jobs:
             exit 0
           fi
           echo "要清理陈旧的 next 标签（指向 $current_next）"
-          # npm 的 dist-tag 写权限有一个坑（2026-10-30 实测）：
+          # npm 的 dist-tag 写权限有一个坑（2026-10-30 实测，2026-11-18 更新）：
           #
-          #   - `npm dist-tag add`（POST）—— granular token 可以；
-          #   - `npm dist-tag rm`（DELETE）—— 被 npm 拒绝，403：
+          #   - 默认情况下 OIDC（Trusted Publishing）的权限位只有 npm publish，
+          #     没有 dist-tag（实测 401）。但包设置里给 trusted publisher 勾上
+          #     "Allow npm dist-tag" 后，OIDC 就能 DELETE dist-tag（2026-11-18
+          #     实测，run 44318687686 一次通过）。本仓库已勾，所以下面第一步
+          #     OIDC 删除现在会成功。详见 docs/FORK.md §9.2。
+          #   - granular token（bypass 2FA）：POST（改指）可以，DELETE 被拒 403：
           #     "Granular access tokens that bypass two-factor authentication
-          #      may not perform this action."
-          #     npm 的安全模型要求 DELETE 这类敏感操作做真正的 2FA 验证，
-          #     而"跳过 2FA"的凭据被排除在外。
-          #   - OIDC（Trusted Publishing）也不行：它的权限位只有
-          #     npm publish / npm stage publish，没有 dist-tag（实测 401）。
+          #      may not perform this action." 且新版 npm 在 OIDC 环境里优先用
+          #     trusted publisher 身份，写进 ~/.npmrc 的 token 根本不会被用到。
           #   - npmjs.com 网页上没有删除 dist-tag 的 UI（Versions 页的
           #     Current Tags 是只读的）。
           #
-          # 所以这里先试删除（将来若换成不带 bypass 2FA 的 token 就能成），
+          # 顺序：先试 OIDC 删除（现在会成）→ 不行再试 token 删除/改指（兜底，
+          # 实际上 OIDC 环境下走不到）→ 都不行才留 warning。
           # 删不掉就**改指**：把 next 重新指到本次发布的版本。
           # 危害一样被消除 —— `npm i @pricening/pi-web@next` 拿到的是当前版本，
           # 而不是几个月前的旧版本。
