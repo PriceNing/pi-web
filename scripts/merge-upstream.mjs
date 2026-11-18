@@ -66,6 +66,13 @@ export const POLICY = {
   // 免得和 sync-upstream.yml 抢同一个版本号（第二个进程必撞 E409）。
   ".github/workflows/sync-upstream.yml": "ours",
   ".github/workflows/publish.yml": "ours",
+  // 品牌宽度测试（2026-11-18）：上游断言「版本号文本再多一位也放得下」，
+  // 那是按它自己的短版本（0.17.x）写的；我们的 0.12.x 多一个字符，
+  // 0.12.10 起这条余量断言必挂（上游自己到 0.17.10 也会挂）。
+  // fork 副本只改最后一条断言，其余逐字保留；宽度真不够时由
+  // lib/brand-version-width.test.mjs 这个 fork 自己的金丝雀大声报错。
+  // 注意：上游改这个文件时合并报告会把列在 resolvedByPolicy 里，要人工重审。
+  "components/PiWebTitle.test.mjs": "ours",
 };
 
 /**
