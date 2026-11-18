@@ -18,7 +18,7 @@
 //     ③ 合并 upstream/main，按策略自动解冲突
 //     ④ 把结果写进 .merge-upstream-report.json（供 CI 读 incoming 数）
 //
-// 退出码：0 = 合并完成；2 = 有需要判断的冲突（已开 issue，合并状态保留在原地）。
+// 退出码：0 = 合并完成；2 = 有需要判断的冲突（告警结果见 notes，合并状态保留在原地）。
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -567,7 +567,9 @@ function main() {
   for (const note of result.notes) console.log(`[merge-upstream] ${note}`);
   if (result.manual.length > 0) {
     console.error(`[merge-upstream] 需要人判断: ${result.manual.join(", ")}`);
-    console.error("[merge-upstream] 已开 issue；解完提交推送后手动触发发版");
+    // 告警是否真的发出去了，以上面 notes 里 openIssue 的真实结果为准；
+    // 这里不再无条件说「已开 issue」（本 fork 禁用了 Issues，那句话曾是断更根因之一）。
+    console.error("[merge-upstream] 解完提交推送后手动触发发版；处理方式见 docs/FORK.md §12");
     return 2;
   }
   if (!result.ok) {
