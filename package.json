@@ -1,6 +1,6 @@
 {
   "name": "@pricening/pi-web",
-  "version": "0.12.11",
+  "version": "0.12.12",
   "description": "Web UI for the pi coding agent (personal fork of @agegr/pi-web with a global Archives page that bulk-deletes a project's sessions)",
   "homepage": "https://github.com/PriceNing/pi-web#readme",
   "repository": {
@@ -108,7 +108,7 @@
   "forkedFrom": {
     "name": "@agegr/pi-web",
     "version": "0.17.0",
-    "commit": "f97292eee7957e8d166d94433ec8df554fe0c9f3",
+    "commit": "1e5357377a5a4f3055a941399530502ecc84232d",
     "url": "https://github.com/agegr/pi-web"
   }
 }
