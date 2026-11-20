@@ -1,0 +1,114 @@
+name: Publish
+
+# 手动重发通道：把**已经存在**的版本重新发到 npm（Trusted Publishing / OIDC）。
+#
+# 日常发版不靠这个文件 —— 那是 .github/workflows/sync-upstream.yml 的活：
+# 它每天同步上游、算版本号、构建、发布、确认版本真的到了 registry、建 Release。
+#
+# 为什么还需要这个文件：
+#
+#   1. 上游 v0.13.0 把自己的发版方式换成了「推 v* tag → publish.yml 发布」，
+#      并且**删掉了**它那份 sync-upstream.yml。我们的同名文件差点跟着被删掉
+#      （上游删文件 = 我们的流水线消失），所以合并策略把两个 workflow 都钉成 ours。
+#      既然上游那边有 publish.yml，我们这边也得有一个同名文件，否则下次合并
+#      又要人工判断「这个删掉的上游文件 ours 要不要恢复」。
+#   2. npm 的发布后处理队列最长实测约一小时（"Your package is being processed
+#      and may take a few minutes to become available"）。那段时间里如果版本
+#      没真的出现，重新跑一次同步流水线代价很大（会再算一次版本号）。
+#      这个文件只重发**指定**版本，不碰 main、不改版本号、不建 Release。
+#
+# 触发方式（手动）：
+#   gh workflow run publish.yml --repo PriceNing/pi-web --ref main \
+#       -f version=0.12.7
+#
+# 刻意**不监听 tag**：如果监听 v*，那么 sync-upstream.yml 推 tag 时会同时触发
+# 这里，两个进程抢同一个版本号，第二个必然撞 E409。日常发版只有一条路径。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "要发布的版本（纯 x.y.z，不带 v 前缀）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-manual
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          # Trusted Publishing needs npm 11.5.1 or later; Node 24 bundles it.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: 校验版本号
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version 必须是纯 x.y.z（不带 v 前缀），收到：$VERSION"
+            exit 1
+          fi
+
+      - name: 确认这个版本还没发布过
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # 已经发过的版本再发一次会撞 E409 "You cannot publish over the
+          # previously published versions"。这里提前挡住，别浪费一次 OIDC。
+          if npm view "@pricening/pi-web@$VERSION" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "::error::@pricening/pi-web@$VERSION 已经发布过了，不用重发"
+            exit 1
+          fi
+          echo "版本 $VERSION 尚未发布，可以发"
+
+      - name: 把 package.json 的版本对齐到要发布的版本
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          # npm version 会顺手改 package-lock.json 里的版本号，这里一起带上，
+          # 免得仓库里的 lock 落后一个版本。
+          npm install --package-lock-only --no-audit --no-fund
+          node -p "'package.json=' + require('./package.json').version"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建
+        run: npm run build
+
+      - name: 发布到 npm
+        run: npm publish --access public
+
+      - name: 确认版本真的到了 registry（npm 的队列最长约一小时）
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          for i in $(seq 1 20); do
+            sleep 60
+            if npm view "@pricening/pi-web@$VERSION" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+              echo "::notice title=发布成功::$VERSION 已经在 registry 上可见"
+              exit 0
+            fi
+            echo "第 $i 次检查：$VERSION 还不可见，继续等"
+          done
+          echo "::error title=发布后仍不可见::$VERSION 在 20 分钟后仍不可见。npm 的后处理队列可能还没走完，请稍后再查，不要用同一个版本号重发（会撞 E409）。"
+          exit 1
